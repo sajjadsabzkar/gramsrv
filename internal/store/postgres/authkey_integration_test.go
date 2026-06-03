@@ -1,0 +1,72 @@
+package postgres
+
+import (
+	"context"
+	"crypto/rand"
+	"os"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"telesrv/internal/store"
+)
+
+// testPool 连接 TELESRV_TEST_POSTGRES_DSN 指向的库（迁移到最新），未设则跳过。
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	dsn := os.Getenv("TELESRV_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set TELESRV_TEST_POSTGRES_DSN to run postgres integration test")
+	}
+	if err := Migrate(dsn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	pool, err := Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// TestAuthKeyStoreRoundTrip 验证 auth_key 落 PG 后，用全新 store 实例（模拟进程重启、无内存缓存）能原样读回。
+// 这是「server 重启保住 auth_key」的直接证明。
+func TestAuthKeyStoreRoundTrip(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	var id [8]byte
+	var val [256]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rand.Read(val[:]); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM auth_keys WHERE auth_key_id = $1", authKeyIDToInt64(id))
+	})
+
+	want := store.AuthKeyData{ID: id, Value: val, ServerSalt: 0x0badf00d}
+	if err := NewAuthKeyStore(pool).Save(ctx, want); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, found, err := NewAuthKeyStore(pool).Get(ctx, id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !found {
+		t.Fatal("auth key not found after save (重启后丢失)")
+	}
+	if got.ID != want.ID || got.Value != want.Value || got.ServerSalt != want.ServerSalt {
+		t.Fatalf("round trip mismatch: got salt=%#x value[:4]=%x, want salt=%#x value[:4]=%x",
+			got.ServerSalt, got.Value[:4], want.ServerSalt, want.Value[:4])
+	}
+
+	var missing [8]byte
+	missing[0] = id[0] ^ 0xff
+	if _, found, err := NewAuthKeyStore(pool).Get(ctx, missing); err != nil || found {
+		t.Fatalf("missing key: found=%v err=%v, want found=false err=nil", found, err)
+	}
+}

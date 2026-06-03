@@ -1,0 +1,22 @@
+# Go build artifacts
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# 本地环境 / 密钥（server RSA private key 必须持久化，但禁止入库）
+*.local
+*.pem
+*.key
+/secrets/
+/data/*
+!/data/langpack/
+!/data/langpack/**
+logs/
+.gocache/
+.tdesktop-e2e/
+
+# IDE
+.idea/
+.vscode/

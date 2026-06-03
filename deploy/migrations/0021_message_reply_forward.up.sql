@@ -1,0 +1,35 @@
+-- 0021_message_reply_forward: private-message silent/reply/forward metadata.
+
+ALTER TABLE private_messages
+    ADD COLUMN IF NOT EXISTS silent BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS noforwards BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS reply_to_msg_id INT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS reply_to_peer_type VARCHAR(16) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS reply_to_peer_id BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS reply_to_top_id INT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS quote_text TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS quote_entities JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS quote_offset INT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS fwd_from_peer_type VARCHAR(16) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS fwd_from_peer_id BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS fwd_from_name TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS fwd_date INT NOT NULL DEFAULT 0;
+
+ALTER TABLE message_boxes
+    ADD COLUMN IF NOT EXISTS silent BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS noforwards BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS reply_to_msg_id INT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS reply_to_peer_type VARCHAR(16) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS reply_to_peer_id BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS reply_to_top_id INT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS quote_text TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS quote_entities JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS quote_offset INT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS fwd_from_peer_type VARCHAR(16) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS fwd_from_peer_id BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS fwd_from_name TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS fwd_date INT NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS message_boxes_reply_lookup_idx
+    ON message_boxes (owner_user_id, peer_type, peer_id, box_id)
+    WHERE NOT deleted;

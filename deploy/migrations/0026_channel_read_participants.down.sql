@@ -1,0 +1,1 @@
+-- No-op: read receipt dates and TDesktop app config keys are forward-compatible.

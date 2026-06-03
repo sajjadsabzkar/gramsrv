@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS channels_public_broadcast_recommendations_idx;

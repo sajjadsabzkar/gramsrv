@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS channel_invites CASCADE;
+DROP TABLE IF EXISTS channel_dialogs CASCADE;
+DROP TABLE IF EXISTS channel_admin_log_events CASCADE;
+DROP TABLE IF EXISTS channel_update_events CASCADE;
+DROP TABLE IF EXISTS channel_messages CASCADE;
+DROP TABLE IF EXISTS channel_members CASCADE;
+DROP TABLE IF EXISTS channel_usernames CASCADE;
+DROP TABLE IF EXISTS channel_invite_hashes CASCADE;
+DROP TABLE IF EXISTS channels CASCADE;

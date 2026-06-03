@@ -1,0 +1,6 @@
+-- No-op by design.
+--
+-- These columns/table are part of the fresh 0022 channel schema. This migration
+-- only backfills older developer databases that had already applied an earlier
+-- 0022 draft, so dropping the objects on a one-step rollback would corrupt fresh
+-- schemas where 0022 legitimately owns them.

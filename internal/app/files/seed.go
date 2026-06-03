@@ -1,0 +1,860 @@
+package files
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"telesrv/internal/domain"
+)
+
+// 本文件实现从外部导出的 reaction / sticker 资源目录导入媒体种子：
+// JSON 元数据（外部导出 document id/access_hash/file_reference/attributes/thumbs）落 documents /
+// sticker_sets / available_reactions 表，二进制 .tgs/.webp/缩略图落 blob backend。
+// dc_id 统一重写为本 server 的 DC，使客户端从本 DC 下载。导入幂等（已存在则跳过）。
+
+// SeedStats 汇报一次种子导入结果。
+type SeedStats struct {
+	Reactions   int
+	StickerSets int
+	Documents   int
+	Blobs       int
+	Skipped     bool
+}
+
+// SeedMedia 从导出根目录导入 reaction 与 sticker 资源。maxRegularSets<=0 表示不限。
+func (s *Service) SeedMedia(ctx context.Context, root string, maxRegularSets int) (SeedStats, error) {
+	var stats SeedStats
+	if root == "" {
+		stats.Skipped = true
+		return stats, nil
+	}
+	if _, err := os.Stat(root); err != nil {
+		// 目录不存在：跳过而非失败（开发机可能未放资源）。
+		stats.Skipped = true
+		return stats, nil
+	}
+
+	// reactions
+	if n, err := s.media.CountAvailableReactions(ctx); err != nil {
+		return stats, err
+	} else if n == 0 {
+		if err := s.seedReactions(ctx, root, &stats); err != nil {
+			return stats, fmt.Errorf("seed reactions: %w", err)
+		}
+	} else if incomplete, err := s.availableReactionSeedNeedsRepair(ctx); err != nil {
+		return stats, err
+	} else if incomplete {
+		if err := s.seedReactions(ctx, root, &stats); err != nil {
+			return stats, fmt.Errorf("repair reactions: %w", err)
+		}
+	}
+
+	// sticker sets（default 系统集 + 常规集）
+	if n, err := s.media.CountStickerSets(ctx); err != nil {
+		return stats, err
+	} else if n == 0 {
+		if err := s.seedStickerSets(ctx, root, maxRegularSets, &stats); err != nil {
+			return stats, fmt.Errorf("seed sticker sets: %w", err)
+		}
+	} else if stale, err := s.stickerSetDocumentThumbsNeedInlineCache(ctx); err != nil {
+		return stats, err
+	} else if stale {
+		if err := s.seedStickerSets(ctx, root, maxRegularSets, &stats); err != nil {
+			return stats, fmt.Errorf("repair sticker set thumbs: %w", err)
+		}
+	}
+
+	if stats.Reactions == 0 && stats.StickerSets == 0 {
+		stats.Skipped = true
+	}
+	return stats, nil
+}
+
+// ---- reactions ----
+
+func (s *Service) seedReactions(ctx context.Context, root string, stats *SeedStats) error {
+	reactionsDir := filepath.Join(root, "telegram_reactions_export", "reactions")
+	rawPath := filepath.Join(root, "telegram_reactions_export", "global_json", "available_reactions_raw.json")
+	raw, err := os.ReadFile(rawPath)
+	if err != nil {
+		return nil // 没有 reaction 资源就跳过
+	}
+	var parsed struct {
+		Result struct {
+			Reactions []seedReactionJSON `json:"reactions"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return fmt.Errorf("parse available_reactions_raw.json: %w", err)
+	}
+	index, err := scanSeedDir(reactionsDir)
+	if err != nil {
+		return err
+	}
+	for i, rj := range parsed.Result.Reactions {
+		ar := domain.AvailableReaction{
+			Reaction: rj.Reaction,
+			Title:    rj.Title,
+			Inactive: rj.Inactive,
+			Premium:  rj.Premium,
+			Order:    i,
+		}
+		set := func(dst *int64, d *seedDocumentJSON) error {
+			if d == nil || d.ID == 0 {
+				return nil
+			}
+			doc, err := s.importDocument(ctx, *d, reactionsDir, index, stats)
+			if err != nil {
+				return err
+			}
+			*dst = doc.ID
+			return nil
+		}
+		if err := set(&ar.StaticIconID, rj.StaticIcon); err != nil {
+			return err
+		}
+		if err := set(&ar.AppearAnimationID, rj.AppearAnimation); err != nil {
+			return err
+		}
+		if err := set(&ar.SelectAnimationID, rj.SelectAnimation); err != nil {
+			return err
+		}
+		if err := set(&ar.ActivateAnimationID, rj.ActivateAnimation); err != nil {
+			return err
+		}
+		if err := set(&ar.EffectAnimationID, rj.EffectAnimation); err != nil {
+			return err
+		}
+		if err := set(&ar.AroundAnimationID, rj.AroundAnimation); err != nil {
+			return err
+		}
+		if err := set(&ar.CenterIconID, rj.CenterIcon); err != nil {
+			return err
+		}
+		if err := s.media.PutAvailableReaction(ctx, ar); err != nil {
+			return err
+		}
+		stats.Reactions++
+	}
+	return nil
+}
+
+func (s *Service) availableReactionSeedNeedsRepair(ctx context.Context) (bool, error) {
+	reactions, err := s.media.ListAvailableReactions(ctx)
+	if err != nil {
+		return false, err
+	}
+	var docIDs []int64
+	for _, r := range reactions {
+		for _, id := range r.DocumentIDs() {
+			if id == 0 {
+				continue
+			}
+			docIDs = append(docIDs, id)
+			if _, ok, err := s.media.GetFileBlob(ctx, fmt.Sprintf("doc:%d", id)); err != nil {
+				return false, err
+			} else if !ok {
+				return true, nil
+			}
+		}
+	}
+	if stale, err := s.documentsNeedInlineCachedThumbs(ctx, docIDs); err != nil || stale {
+		return stale, err
+	}
+	return false, nil
+}
+
+// ---- sticker sets ----
+
+func (s *Service) seedStickerSets(ctx context.Context, root string, maxRegular int, stats *SeedStats) error {
+	// default 系统集：目录名 → system_key。
+	defaultDir := filepath.Join(root, "telegram_default_stickers_export")
+	order := 0
+	if entries, err := os.ReadDir(defaultDir); err == nil {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.IsDir() {
+				names = append(names, e.Name())
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			systemKey := systemKeyForDefaultSet(name)
+			setDir := filepath.Join(defaultDir, name)
+			if err := s.importStickerSetDir(ctx, setDir, systemKey, order, stats); err != nil {
+				return fmt.Errorf("import default set %s: %w", name, err)
+			}
+			order++
+		}
+	}
+
+	// 常规贴纸集。
+	regularDir := filepath.Join(root, "telegram_stickers_export")
+	if entries, err := os.ReadDir(regularDir); err == nil {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.IsDir() {
+				names = append(names, e.Name())
+			}
+		}
+		sort.Strings(names)
+		imported := 0
+		for _, name := range names {
+			if maxRegular > 0 && imported >= maxRegular {
+				break
+			}
+			setDir := filepath.Join(regularDir, name)
+			if err := s.importStickerSetDir(ctx, setDir, "", order, stats); err != nil {
+				return fmt.Errorf("import sticker set %s: %w", name, err)
+			}
+			order++
+			imported++
+		}
+	}
+	return nil
+}
+
+func (s *Service) importStickerSetDir(ctx context.Context, setDir, systemKey string, order int, stats *SeedStats) error {
+	infoPath := filepath.Join(setDir, "set_info.json")
+	raw, err := os.ReadFile(infoPath)
+	if err != nil {
+		return nil // 该目录无 set_info.json → 跳过
+	}
+	var info struct {
+		Result seedStickerSetResultJSON `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return fmt.Errorf("parse %s: %w", infoPath, err)
+	}
+	sj := info.Result.Set
+	if sj.ID == 0 {
+		return nil
+	}
+	stickersDir := filepath.Join(setDir, "stickers")
+	index, err := scanSeedDir(stickersDir)
+	if err != nil {
+		return err
+	}
+
+	docIDs := make([]int64, 0, len(info.Result.Documents))
+	docs := make([]domain.Document, 0, len(info.Result.Documents))
+	docIDBySource := make(map[int64]int64, len(info.Result.Documents))
+	for _, dj := range info.Result.Documents {
+		sourceID := dj.ID
+		doc, err := s.importDocument(ctx, dj, stickersDir, index, stats)
+		if err != nil {
+			return err
+		}
+		if doc.ID != 0 {
+			docIDBySource[sourceID] = doc.ID
+			docIDs = append(docIDs, doc.ID)
+			docs = append(docs, doc)
+		}
+	}
+
+	kind := stickerSetKind(sj, systemKey)
+	set := domain.StickerSet{
+		ID:              sj.ID,
+		AccessHash:      sj.AccessHash,
+		ShortName:       sj.ShortName,
+		Title:           sj.Title,
+		Count:           sj.Count,
+		Hash:            sj.Hash,
+		Kind:            kind,
+		Official:        sj.Official,
+		Animated:        true, // 导出资源均为 .tgs 动画贴纸
+		Emojis:          sj.Emojis,
+		Masks:           sj.Masks,
+		Archived:        sj.Archived,
+		Installed:       seedStickerSetInstalled(kind),
+		ThumbDocumentID: seedDocumentStorageID(derefInt64(sj.ThumbDocumentID)),
+		Thumbs:          seedStickerSetPhotoSizes(sj.Thumbs),
+		ThumbDCID:       s.dc,
+		ThumbVersion:    sj.ThumbVersion,
+		DocumentIDs:     docIDs,
+		Packs:           seedStickerPacks(sj.Packs, info.Result.Packs, docIDBySource),
+		SortOrder:       order,
+		SystemKey:       systemKey,
+	}
+	if set.Count == 0 {
+		set.Count = len(docIDs)
+	}
+	if err := s.media.PutStickerSet(ctx, set); err != nil {
+		return err
+	}
+	s.stickerSetCache.put(set, docs)
+	stats.StickerSets++
+	return nil
+}
+
+// ---- 单个 document 导入 ----
+
+func (s *Service) importDocument(ctx context.Context, dj seedDocumentJSON, binDir string, index seedDirIndex, stats *SeedStats) (domain.Document, error) {
+	if dj.ID == 0 {
+		return domain.Document{}, nil
+	}
+	storageID := seedDocumentStorageID(dj.ID)
+	ref, _ := hex.DecodeString(dj.FileReference)
+	doc := domain.Document{
+		ID:            storageID,
+		AccessHash:    dj.AccessHash,
+		FileReference: ref,
+		Date:          parseSeedDate(dj.Date),
+		MimeType:      dj.MimeType,
+		Size:          dj.Size,
+		DCID:          s.dc,
+		Attributes:    seedDocumentAttributes(dj.Attributes),
+	}
+
+	// 主体 blob：doc:<server-owned-id>
+	if mainPath, ok := index.main[dj.ID]; ok {
+		data, err := os.ReadFile(mainPath)
+		if err != nil {
+			return domain.Document{}, err
+		}
+		objectKey, err := s.blobs.Put(ctx, data)
+		if err != nil {
+			return domain.Document{}, err
+		}
+		if err := s.media.PutFileBlob(ctx, domain.FileBlob{
+			LocationKey: fmt.Sprintf("doc:%d", storageID),
+			Backend:     domain.MediaBackend(s.blobs.Name()),
+			ObjectKey:   objectKey,
+			Size:        int64(len(data)),
+			MimeType:    dj.MimeType,
+		}); err != nil {
+			return domain.Document{}, err
+		}
+		s.prewarmSmallBlob(objectKey, data)
+		stats.Blobs++
+	}
+
+	// 缩略图：PhotoPathSize 内联；小的 PhotoSize 静态图同时写 blob 并作为
+	// PhotoCachedSize 返回，让 TDesktop 处理 document 元数据时即可填本地 image cache。
+	thumbs := make([]domain.PhotoSize, 0, len(dj.Thumbs))
+	for _, tj := range dj.Thumbs {
+		ps, downloadable := seedPhotoSize(tj)
+		if ps.Kind == "" {
+			continue
+		}
+		if downloadable {
+			thumbPath, ok := index.thumb[dj.ID][ps.Type]
+			if !ok {
+				continue // 无可服务的缩略图文件，丢弃该尺寸（保留 PhotoPathSize 占位）
+			}
+			data, err := os.ReadFile(thumbPath)
+			if err != nil {
+				return domain.Document{}, err
+			}
+			objectKey, err := s.blobs.Put(ctx, data)
+			if err != nil {
+				return domain.Document{}, err
+			}
+			ps.Size = len(data)
+			if err := s.media.PutFileBlob(ctx, domain.FileBlob{
+				LocationKey: fmt.Sprintf("doc:%d:%s", storageID, ps.Type),
+				Backend:     domain.MediaBackend(s.blobs.Name()),
+				ObjectKey:   objectKey,
+				Size:        int64(len(data)),
+				MimeType:    seedThumbMimeType(data),
+			}); err != nil {
+				return domain.Document{}, err
+			}
+			ps = seedInlineCachedDocumentThumb(ps, data)
+			s.prewarmSmallBlob(objectKey, data)
+			stats.Blobs++
+		}
+		thumbs = append(thumbs, ps)
+	}
+	doc.Thumbs = seedPreferRasterDocumentThumbs(thumbs)
+
+	if err := s.media.PutDocument(ctx, doc); err != nil {
+		return domain.Document{}, err
+	}
+	stats.Documents++
+	return doc, nil
+}
+
+func (s *Service) prewarmSmallBlob(objectKey string, data []byte) {
+	if len(data) > 0 && len(data) <= blobBytesCacheMaxEntryBytes {
+		s.byteCache.put(objectKey, data)
+	}
+}
+
+// ---- 目录扫描：docID → 主体文件 / 可下载缩略图 ----
+
+type seedDirIndex struct {
+	main  map[int64]string            // docID -> 主体文件路径
+	thumb map[int64]map[string]string // docID -> thumbType -> 缩略图文件路径
+}
+
+var seedTrailingDigits = regexp.MustCompile(`(\d{6,})`)
+var seedThumbMarker = regexp.MustCompile(`_thumb\d+_`)
+
+const seedInlineCachedDocumentThumbMaxBytes = 32 * 1024
+
+// Exported Telegram resources keep their original id in filenames/JSON, but
+// telesrv owns the document catalog it serves. Imported high source ids are
+// normalized once at seed time so RPC/storage use one server-owned id.
+const seedExternalDocumentIDOffset int64 = 4_000_000_000_000_000_000
+
+var seedThumbType = regexp.MustCompile(`PhotoSize_type([a-z])`)
+
+func seedDocumentStorageID(sourceID int64) int64 {
+	if sourceID <= 0 {
+		return 0
+	}
+	if sourceID > seedExternalDocumentIDOffset {
+		return sourceID - seedExternalDocumentIDOffset
+	}
+	return sourceID
+}
+
+func scanSeedDir(dir string) (seedDirIndex, error) {
+	idx := seedDirIndex{main: map[int64]string{}, thumb: map[int64]map[string]string{}}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return idx, nil // 目录不存在 → 空 index
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		ext := strings.ToLower(filepath.Ext(name))
+		full := filepath.Join(dir, name)
+		if marker := seedThumbMarker.FindStringIndex(name); marker != nil {
+			// 只收可下载的 PhotoSize 缩略图（jpg）；PhotoPathSize(svg) 内联在 JSON。
+			if ext != ".jpg" && ext != ".jpeg" {
+				continue
+			}
+			m := seedThumbType.FindStringSubmatch(name)
+			if m == nil {
+				continue
+			}
+			docID := docIDFromName(name[:marker[0]])
+			if docID == 0 {
+				continue
+			}
+			if idx.thumb[docID] == nil {
+				idx.thumb[docID] = map[string]string{}
+			}
+			idx.thumb[docID][m[1]] = full
+			continue
+		}
+		if ext == ".svg" || ext == ".json" {
+			continue
+		}
+		docID := docIDFromName(strings.TrimSuffix(name, filepath.Ext(name)))
+		if docID == 0 {
+			continue
+		}
+		idx.main[docID] = full
+	}
+	return idx, nil
+}
+
+// docIDFromName 取 base name 中末尾最长的数字串作为 document id。
+func docIDFromName(base string) int64 {
+	matches := seedTrailingDigits.FindAllString(base, -1)
+	if len(matches) == 0 {
+		return 0
+	}
+	last := matches[len(matches)-1]
+	id, err := strconv.ParseInt(last, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+func systemKeyForDefaultSet(dirName string) string {
+	switch dirName {
+	case "DefaultSet_AnimatedEmoji":
+		return "animated_emoji"
+	case "DefaultSet_AnimatedEmojiAnimations":
+		return "animated_emoji_animations"
+	case "DefaultSet_EmojiGenericAnimations":
+		return "emoji_generic_animations"
+	case "DefaultSet_Dice_Normal":
+		return "dice:\U0001f3b2"
+	case "DefaultSet_Dice_Dart":
+		return "dice:\U0001f3af"
+	case "DefaultSet_Dice_Basketball":
+		return "dice:\U0001f3c0"
+	case "DefaultSet_Dice_Football":
+		return "dice:⚽"
+	case "DefaultSet_Dice_Bowling":
+		return "dice:\U0001f3b3"
+	case "DefaultSet_Dice_Casino":
+		return "dice:\U0001f3b0"
+	default:
+		return ""
+	}
+}
+
+func stickerSetKind(sj seedStickerSetJSON, systemKey string) domain.StickerSetKind {
+	switch {
+	case systemKey != "":
+		return domain.StickerSetKindSystem
+	case sj.Emojis:
+		return domain.StickerSetKindEmoji
+	case sj.Masks:
+		return domain.StickerSetKindMasks
+	default:
+		return domain.StickerSetKindStickers
+	}
+}
+
+func seedStickerSetInstalled(kind domain.StickerSetKind) bool {
+	return kind != domain.StickerSetKindSystem
+}
+
+// ---- JSON → domain 转换 ----
+
+func seedDocumentAttributes(attrs []seedAttrJSON) []domain.DocumentAttribute {
+	out := make([]domain.DocumentAttribute, 0, len(attrs))
+	for _, a := range attrs {
+		switch a.Type {
+		case "DocumentAttributeImageSize":
+			out = append(out, domain.DocumentAttribute{Kind: domain.DocAttrImageSize, W: a.W, H: a.H})
+		case "DocumentAttributeAnimated":
+			out = append(out, domain.DocumentAttribute{Kind: domain.DocAttrAnimated})
+		case "DocumentAttributeSticker":
+			attr := domain.DocumentAttribute{Kind: domain.DocAttrSticker, Alt: a.Alt, Mask: a.Mask}
+			if a.Stickerset != nil {
+				attr.StickerSetID = a.Stickerset.ID
+				attr.StickerSetAccessHash = a.Stickerset.AccessHash
+			}
+			out = append(out, attr)
+		case "DocumentAttributeCustomEmoji":
+			attr := domain.DocumentAttribute{Kind: domain.DocAttrCustomEmoji, Alt: a.Alt, Free: a.Free, TextColor: a.TextColor}
+			if a.Stickerset != nil {
+				attr.StickerSetID = a.Stickerset.ID
+				attr.StickerSetAccessHash = a.Stickerset.AccessHash
+			}
+			out = append(out, attr)
+		case "DocumentAttributeVideo":
+			out = append(out, domain.DocumentAttribute{Kind: domain.DocAttrVideo, W: a.W, H: a.H, Duration: a.Duration, RoundMessage: a.RoundMessage, SupportsStreaming: a.SupportsStreaming})
+		case "DocumentAttributeAudio":
+			out = append(out, domain.DocumentAttribute{Kind: domain.DocAttrAudio, AudioDuration: int(a.Duration), Voice: a.Voice, Title: a.Title, Performer: a.Performer})
+		case "DocumentAttributeFilename":
+			out = append(out, domain.DocumentAttribute{Kind: domain.DocAttrFilename, FileName: a.FileName})
+		}
+	}
+	return out
+}
+
+func seedPhotoSizes(thumbs []seedThumbJSON) []domain.PhotoSize {
+	out := make([]domain.PhotoSize, 0, len(thumbs))
+	for _, t := range thumbs {
+		ps, _ := seedPhotoSize(t)
+		if ps.Kind != "" {
+			out = append(out, ps)
+		}
+	}
+	return out
+}
+
+func seedStickerSetPhotoSizes(thumbs []seedThumbJSON) []domain.PhotoSize {
+	out := make([]domain.PhotoSize, 0, len(thumbs))
+	for _, t := range thumbs {
+		ps, downloadable := seedPhotoSize(t)
+		if ps.Kind == "" || downloadable {
+			continue
+		}
+		out = append(out, ps)
+	}
+	return out
+}
+
+func seedPhotoSize(t seedThumbJSON) (domain.PhotoSize, bool) {
+	switch t.Type {
+	case "PhotoSize":
+		return domain.PhotoSize{Kind: domain.PhotoSizeKindDefault, Type: t.SizeType, W: t.W, H: t.H, Size: t.Size}, true
+	case "PhotoStrippedSize":
+		b, _ := hex.DecodeString(t.Bytes)
+		return domain.PhotoSize{Kind: domain.PhotoSizeKindStripped, Type: t.SizeType, Bytes: b}, false
+	case "PhotoCachedSize":
+		b, _ := hex.DecodeString(t.Bytes)
+		return domain.PhotoSize{Kind: domain.PhotoSizeKindCached, Type: t.SizeType, W: t.W, H: t.H, Bytes: b}, false
+	case "PhotoPathSize":
+		b, _ := hex.DecodeString(t.Bytes)
+		return domain.PhotoSize{Kind: domain.PhotoSizeKindPath, Type: t.SizeType, Bytes: b}, false
+	case "PhotoSizeProgressive":
+		return domain.PhotoSize{Kind: domain.PhotoSizeKindProgressive, Type: t.SizeType, W: t.W, H: t.H, Sizes: t.Sizes}, true
+	default:
+		return domain.PhotoSize{}, false
+	}
+}
+
+func seedInlineCachedDocumentThumb(ps domain.PhotoSize, data []byte) domain.PhotoSize {
+	if ps.Kind != domain.PhotoSizeKindDefault || len(data) == 0 || len(data) > seedInlineCachedDocumentThumbMaxBytes {
+		return ps
+	}
+	ps.Kind = domain.PhotoSizeKindCached
+	ps.Size = 0
+	ps.Bytes = append([]byte(nil), data...)
+	return ps
+}
+
+func seedPreferRasterDocumentThumbs(sizes []domain.PhotoSize) []domain.PhotoSize {
+	if !documentThumbsHaveRaster(sizes) {
+		return sizes
+	}
+	out := sizes[:0]
+	for _, size := range sizes {
+		if size.Kind == domain.PhotoSizeKindPath {
+			continue
+		}
+		out = append(out, size)
+	}
+	return out
+}
+
+func seedThumbMimeType(data []byte) string {
+	switch {
+	case len(data) >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F' &&
+		data[8] == 'W' && data[9] == 'E' && data[10] == 'B' && data[11] == 'P':
+		return "image/webp"
+	case len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF:
+		return "image/jpeg"
+	case len(data) >= 8 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G':
+		return "image/png"
+	case len(data) >= 6 && data[0] == 'G' && data[1] == 'I' && data[2] == 'F':
+		return "image/gif"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func (s *Service) stickerSetDocumentThumbsNeedInlineCache(ctx context.Context) (bool, error) {
+	var ids []int64
+	for _, kind := range []domain.StickerSetKind{
+		domain.StickerSetKindStickers,
+		domain.StickerSetKindEmoji,
+		domain.StickerSetKindMasks,
+		domain.StickerSetKindSystem,
+	} {
+		sets, err := s.media.ListStickerSets(ctx, kind)
+		if err != nil {
+			return false, err
+		}
+		for _, set := range sets {
+			ids = append(ids, set.DocumentIDs...)
+		}
+	}
+	return s.documentsNeedInlineCachedThumbs(ctx, ids)
+}
+
+func (s *Service) documentsNeedInlineCachedThumbs(ctx context.Context, ids []int64) (bool, error) {
+	if len(ids) == 0 {
+		return false, nil
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	unique := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	docs, err := s.media.GetDocuments(ctx, unique)
+	if err != nil {
+		return false, err
+	}
+	for _, doc := range docs {
+		if documentThumbsHaveRaster(doc.Thumbs) && documentThumbsHavePath(doc.Thumbs) {
+			return true, nil
+		}
+		for _, thumb := range doc.Thumbs {
+			if thumb.Kind == domain.PhotoSizeKindDefault && thumb.Size > 0 && thumb.Size <= seedInlineCachedDocumentThumbMaxBytes {
+				return true, nil
+			}
+			if thumb.Kind == domain.PhotoSizeKindCached && len(thumb.Bytes) > 0 {
+				blob, ok, err := s.media.GetFileBlob(ctx, fmt.Sprintf("doc:%d:%s", doc.ID, thumb.Type))
+				if err != nil {
+					return false, err
+				}
+				if ok {
+					want := seedThumbMimeType(thumb.Bytes)
+					if want != "application/octet-stream" && blob.MimeType != want {
+						return true, nil
+					}
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+func documentThumbsHaveRaster(sizes []domain.PhotoSize) bool {
+	for _, size := range sizes {
+		switch size.Kind {
+		case domain.PhotoSizeKindCached:
+			if len(size.Bytes) > 0 {
+				return true
+			}
+		case domain.PhotoSizeKindDefault:
+			if size.Type != "" && size.Size > 0 {
+				return true
+			}
+		case domain.PhotoSizeKindProgressive:
+			if size.Type != "" && len(size.Sizes) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func documentThumbsHavePath(sizes []domain.PhotoSize) bool {
+	for _, size := range sizes {
+		if size.Kind == domain.PhotoSizeKindPath && len(size.Bytes) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func seedStickerPacks(setPacks, resultPacks []seedStickerPackJSON, docIDBySource map[int64]int64) []domain.StickerPack {
+	packs := setPacks
+	if len(packs) == 0 {
+		packs = resultPacks
+	}
+	out := make([]domain.StickerPack, 0, len(packs))
+	for _, p := range packs {
+		documents := make([]int64, 0, len(p.Documents))
+		for _, sourceID := range p.Documents {
+			if id, ok := docIDBySource[sourceID]; ok {
+				documents = append(documents, id)
+				continue
+			}
+			if id := seedDocumentStorageID(sourceID); id != 0 {
+				documents = append(documents, id)
+			}
+		}
+		out = append(out, domain.StickerPack{Emoticon: p.Emoticon, DocumentIDs: documents})
+	}
+	return out
+}
+
+func parseSeedDate(s string) int {
+	if s == "" {
+		return 0
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return int(t.Unix())
+	}
+	return 0
+}
+
+func derefInt64(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+// ---- seed JSON 结构 ----
+
+type seedInputStickerSetJSON struct {
+	ID         int64 `json:"id"`
+	AccessHash int64 `json:"access_hash"`
+}
+
+type seedAttrJSON struct {
+	Type              string                   `json:"_"`
+	W                 int                      `json:"w"`
+	H                 int                      `json:"h"`
+	Alt               string                   `json:"alt"`
+	Mask              bool                     `json:"mask"`
+	Duration          float64                  `json:"duration"`
+	RoundMessage      bool                     `json:"round_message"`
+	SupportsStreaming bool                     `json:"supports_streaming"`
+	Voice             bool                     `json:"voice"`
+	Title             string                   `json:"title"`
+	Performer         string                   `json:"performer"`
+	FileName          string                   `json:"file_name"`
+	Free              bool                     `json:"free"`
+	TextColor         bool                     `json:"text_color"`
+	Stickerset        *seedInputStickerSetJSON `json:"stickerset"`
+}
+
+type seedThumbJSON struct {
+	Type     string `json:"_"`
+	SizeType string `json:"type"`
+	W        int    `json:"w"`
+	H        int    `json:"h"`
+	Size     int    `json:"size"`
+	Bytes    string `json:"bytes"`
+	Sizes    []int  `json:"sizes"`
+}
+
+type seedDocumentJSON struct {
+	ID            int64           `json:"id"`
+	AccessHash    int64           `json:"access_hash"`
+	FileReference string          `json:"file_reference"`
+	Date          string          `json:"date"`
+	MimeType      string          `json:"mime_type"`
+	Size          int64           `json:"size"`
+	DCID          int             `json:"dc_id"`
+	Attributes    []seedAttrJSON  `json:"attributes"`
+	Thumbs        []seedThumbJSON `json:"thumbs"`
+}
+
+type seedStickerPackJSON struct {
+	Emoticon  string  `json:"emoticon"`
+	Documents []int64 `json:"documents"`
+}
+
+type seedStickerSetJSON struct {
+	ID              int64                 `json:"id"`
+	AccessHash      int64                 `json:"access_hash"`
+	Title           string                `json:"title"`
+	ShortName       string                `json:"short_name"`
+	Count           int                   `json:"count"`
+	Hash            int                   `json:"hash"`
+	Archived        bool                  `json:"archived"`
+	Official        bool                  `json:"official"`
+	Masks           bool                  `json:"masks"`
+	Emojis          bool                  `json:"emojis"`
+	Thumbs          []seedThumbJSON       `json:"thumbs"`
+	ThumbDCID       int                   `json:"thumb_dc_id"`
+	ThumbVersion    int                   `json:"thumb_version"`
+	ThumbDocumentID *int64                `json:"thumb_document_id"`
+	Packs           []seedStickerPackJSON `json:"packs"`
+}
+
+type seedStickerSetResultJSON struct {
+	Set       seedStickerSetJSON    `json:"set"`
+	Packs     []seedStickerPackJSON `json:"packs"`
+	Documents []seedDocumentJSON    `json:"documents"`
+}
+
+type seedReactionJSON struct {
+	Reaction          string            `json:"reaction"`
+	Title             string            `json:"title"`
+	Inactive          bool              `json:"inactive"`
+	Premium           bool              `json:"premium"`
+	StaticIcon        *seedDocumentJSON `json:"static_icon"`
+	AppearAnimation   *seedDocumentJSON `json:"appear_animation"`
+	SelectAnimation   *seedDocumentJSON `json:"select_animation"`
+	ActivateAnimation *seedDocumentJSON `json:"activate_animation"`
+	EffectAnimation   *seedDocumentJSON `json:"effect_animation"`
+	AroundAnimation   *seedDocumentJSON `json:"around_animation"`
+	CenterIcon        *seedDocumentJSON `json:"center_icon"`
+}
