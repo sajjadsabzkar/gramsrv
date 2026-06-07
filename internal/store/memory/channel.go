@@ -4937,6 +4937,7 @@ func (s *ChannelStore) ListChannelDifference(_ context.Context, req domain.Chann
 			}
 			messages = append(messages, cloneChannelMessage(msg))
 		}
+		s.populateChannelMessageUnreadFlagsLocked(req.UserID, messages)
 		return domain.ChannelDifference{
 			Channel:     channel,
 			Self:        member,
@@ -4991,6 +4992,15 @@ func (s *ChannelStore) ListChannelDifference(_ context.Context, req domain.Chann
 			diff.OtherUpdates = append(diff.OtherUpdates, cloneChannelEvent(event))
 		}
 	}
+	s.populateChannelMessageUnreadFlagsLocked(req.UserID, diff.NewMessages)
+	for i := range diff.OtherUpdates {
+		if diff.OtherUpdates[i].Message.ID == 0 {
+			continue
+		}
+		messages := []domain.ChannelMessage{diff.OtherUpdates[i].Message}
+		s.populateChannelMessageUnreadFlagsLocked(req.UserID, messages)
+		diff.OtherUpdates[i].Message = messages[0]
+	}
 	return diff, nil
 }
 
@@ -5019,6 +5029,46 @@ func (s *ChannelStore) ListActiveChannelIDsForUser(_ context.Context, userID, af
 		out = append(out, channelID)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *ChannelStore) ListDirtyActiveChannelsForUser(_ context.Context, userID int64, sinceDate int, afterChannelID int64, limit int) ([]domain.DirtyChannel, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if userID == 0 || sinceDate <= 0 || afterChannelID < 0 {
+		return nil, domain.ErrChannelInvalid
+	}
+	if limit <= 0 || limit > domain.MaxChannelDifferenceLimit {
+		limit = domain.MaxChannelDifferenceLimit
+	}
+	out := make([]domain.DirtyChannel, 0, limit)
+	for channelID, members := range s.members {
+		if channelID <= afterChannelID {
+			continue
+		}
+		channel, ok := s.channels[channelID]
+		if !ok || channel.Deleted {
+			continue
+		}
+		member, ok := members[userID]
+		if !ok || member.Status != domain.ChannelMemberActive {
+			continue
+		}
+		dirty := false
+		for _, event := range s.events[channelID] {
+			if event.Date > sinceDate {
+				dirty = true
+				break
+			}
+		}
+		if dirty {
+			out = append(out, domain.DirtyChannel{ChannelID: channelID, Pts: channel.Pts})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ChannelID < out[j].ChannelID })
 	if len(out) > limit {
 		out = out[:limit]
 	}
@@ -6495,6 +6545,7 @@ func (s *ChannelStore) populateChannelMessageReactionsLocked(viewerUserID int64,
 	if len(messages) == 0 || channel.ID == 0 {
 		return
 	}
+	s.populateChannelMessageUnreadFlagsLocked(viewerUserID, messages)
 	for i := range messages {
 		if messages[i].ChannelID != channel.ID || messages[i].ID <= 0 {
 			continue
@@ -6511,6 +6562,7 @@ func (s *ChannelStore) populateChannelMessagesReactionsLocked(viewerUserID int64
 	if len(messages) == 0 {
 		return
 	}
+	s.populateChannelMessageUnreadFlagsLocked(viewerUserID, messages)
 	channelsByID := make(map[int64]domain.Channel, len(channels))
 	for _, ch := range channels {
 		if ch.ID != 0 {
@@ -6530,6 +6582,22 @@ func (s *ChannelStore) populateChannelMessagesReactionsLocked(viewerUserID int64
 			continue
 		}
 		messages[i].Reactions = cloneChannelMessageReactionsPtr(&reactions)
+	}
+}
+
+func (s *ChannelStore) populateChannelMessageUnreadFlagsLocked(viewerUserID int64, messages []domain.ChannelMessage) {
+	if viewerUserID == 0 || len(messages) == 0 {
+		return
+	}
+	for i := range messages {
+		if messages[i].ChannelID == 0 || messages[i].ID <= 0 {
+			continue
+		}
+		if _, ok := s.mentions[viewerUserID][messages[i].ChannelID][messages[i].ID]; !ok {
+			continue
+		}
+		messages[i].Mentioned = true
+		messages[i].MediaUnread = !messages[i].Media.IsZero()
 	}
 }
 

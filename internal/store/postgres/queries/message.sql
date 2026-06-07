@@ -167,7 +167,9 @@ INSERT INTO message_boxes (
   fwd_from_name,
   fwd_date,
   pts,
-  media
+  media,
+  media_unread,
+  reaction_unread
 ) VALUES (
   $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, sqlc.arg(entities_json)::jsonb,
   sqlc.arg(silent)::boolean,
@@ -184,7 +186,9 @@ INSERT INTO message_boxes (
   sqlc.arg(fwd_from_name)::text,
   sqlc.arg(fwd_date)::int,
   sqlc.arg(pts)::int,
-  sqlc.arg(media_json)::jsonb
+  sqlc.arg(media_json)::jsonb,
+  sqlc.arg(media_unread)::boolean,
+  sqlc.arg(reaction_unread)::boolean
 )
 RETURNING
   box_id,
@@ -212,7 +216,9 @@ RETURNING
   fwd_from_name,
   fwd_date,
   pts,
-  media::text AS media_json;
+  media::text AS media_json,
+  media_unread,
+  reaction_unread;
 
 -- name: GetMessageBoxByPrivateMessage :one
 SELECT
@@ -241,7 +247,9 @@ SELECT
   fwd_from_name,
   fwd_date,
   pts,
-  media::text AS media_json
+  media::text AS media_json,
+  media_unread,
+  reaction_unread
 FROM message_boxes
 WHERE owner_user_id = $1
   AND private_message_id = $2
@@ -295,7 +303,9 @@ SELECT
   m.fwd_from_name,
   m.fwd_date,
   m.pts,
-  m.media::text AS media_json
+  m.media::text AS media_json,
+  m.media_unread,
+  m.reaction_unread
 FROM requested r
 JOIN message_boxes m
   ON m.owner_user_id = sqlc.arg(owner_user_id)::bigint
@@ -351,6 +361,8 @@ base AS NOT MATERIALIZED (
     m.fwd_date,
     m.pts,
     m.media::text AS media_json,
+    m.media_unread,
+    m.reaction_unread,
     COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
     COALESCE(peer_u.access_hash, 0)::bigint AS peer_access_hash,
     COALESCE(peer_u.phone, '')::text AS peer_phone,
@@ -483,6 +495,8 @@ SELECT
   fwd_date,
   pts,
   media_json,
+  media_unread,
+  reaction_unread,
   peer_user_id,
   peer_access_hash,
   peer_phone,
@@ -537,6 +551,8 @@ SELECT
   m.fwd_date,
   m.pts,
   m.media::text AS media_json,
+  m.media_unread,
+  m.reaction_unread,
   COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
   COALESCE(peer_u.access_hash, 0)::bigint AS peer_access_hash,
   COALESCE(peer_u.phone, '')::text AS peer_phone,
@@ -594,7 +610,9 @@ SELECT
   fwd_from_name,
   fwd_date,
   pts,
-  media::text AS media_json
+  media::text AS media_json,
+  media_unread,
+  reaction_unread
 FROM message_boxes
 WHERE owner_user_id = sqlc.arg(owner_user_id)::bigint
   AND box_id = sqlc.arg(box_id)::int
@@ -632,7 +650,9 @@ SELECT
   fwd_from_name,
   fwd_date,
   pts,
-  media::text AS media_json
+  media::text AS media_json,
+  media_unread,
+  reaction_unread
 FROM message_boxes
 WHERE message_sender_id = sqlc.arg(message_sender_id)::bigint
   AND private_message_id = sqlc.arg(private_message_id)::bigint
@@ -684,7 +704,9 @@ RETURNING
   fwd_from_name,
   fwd_date,
   pts,
-  media::text AS media_json;
+  media::text AS media_json,
+  media_unread,
+  reaction_unread;
 
 -- name: GetDialogReadStateForUpdate :one
 SELECT

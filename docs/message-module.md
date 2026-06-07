@@ -27,8 +27,9 @@ Date: 2026-05-31
 | table | partition key | purpose |
 |---|---|---|
 | `private_messages` | `sender_user_id` HASH | 共享私聊消息主体；`sender_user_id + random_id` 保证发送幂等 |
-| `message_boxes` | `owner_user_id` HASH | owner 视角消息盒；TDesktop 看到的 message id 即 `box_id` |
+| `message_boxes` | `owner_user_id` HASH | owner 视角消息盒；TDesktop 看到的 message id 即 `box_id`，并保存当前 owner 的 `media_unread/reaction_unread` 内容已读状态 |
 | `dialogs` | `user_id` HASH | 会话摘要；`folder_id=0/1` 表示主列表/归档，置顶、manual unread、action bar 隐藏均是 owner 视角 |
+| `contact_blocks` | `owner_user_id` HASH | 当前 owner 的 blocklist；`owner_user_id + blocked_user_id` 唯一，作为本阶段私聊 privacy gate |
 | `dialog_filters` / `dialog_filter_settings` | `user_id` HASH | TDesktop 自定义 dialog filter、filter 顺序与 folder tags 开关；不把自定义 filter 伪装成 dialogs.folder_id |
 | `user_update_events` | `user_id` HASH | 账号级 pts durable log；承载新消息、已读 inbox/outbox、文本编辑、删除消息，也承载 contacts reset、dialog pinned/order/manual unread、peer settings、dialog filters 与 folder peers 等 owner 视角状态事件 |
 | `dispatch_outbox` | `target_user_id` HASH | transactional outbox，事务后批量推送在线 session；投递成功即删除，仅保留未完成任务 |
@@ -48,13 +49,15 @@ Redis miss 时分别从 `MAX(user_update_events.pts)` 与 `MAX(message_boxes.box
 
 1. 写 `private_messages`，遇到同 `sender_user_id + random_id` 直接返回原消息盒。
 2. Redis 分配 sender/recipient 的 `box_id` 与 `pts`。
-3. 写 sender/recipient `message_boxes`，并保存 `silent/noforwards/reply_to/fwd_from` 元数据；reply 会把当前 owner 的 `reply_to_msg_id` 翻译成对端 owner 视角的 box_id。
+3. 写 sender/recipient `message_boxes`，并保存 `silent/noforwards/reply_to/fwd_from` 元数据；reply 会把当前 owner 的 `reply_to_msg_id` 翻译成对端 owner 视角的 box_id。incoming media 在 recipient box 上置 `media_unread=true`，sender 自己始终为 false。
 4. upsert 双方 `dialogs`。
 5. 写双方 `user_update_events(new_message)`。
 6. 写双方 `dispatch_outbox`，sender 侧带 `exclude_session_id`。
 7. 提交后由 outbox worker 批量推送在线 session。
 
 若事务失败但 Redis 已分配 pts，store 会尽力写 `noop` 事件占位，避免 pts 回退；PG 不可用时该补偿也可能失败，后续需要告警指标覆盖。
+
+如果 recipient 已 block sender，`SendPrivateText` 仍写 sender outbox/dialog/update，保证当前用户能看到自己发出的消息；但不创建 recipient message box、不推进 recipient pts、不写 recipient dispatch_outbox，也不会进入 recipient 离线 `updates.getDifference`。该规则同样适用于 `messages.sendMedia/sendMultiMedia` 和私聊转发，因为它们共用 `sendOutgoing`/`SendPrivateText`。
 
 ## Forward / Reply Flow
 
@@ -80,6 +83,16 @@ Redis miss 时分别从 `MAX(user_update_events.pts)` 与 `MAX(message_boxes.box
 
 `messages.getOutboxReadDate` 复用 sender 侧 durable `read_history_outbox` 事件：先校验当前 owner 的 `msg_id` 是该 peer 下可见 outgoing message，再取最早一条 `max_id >= msg_id` 的 outbox read event 日期返回 `outboxReadDate`；未被读到返回 `MESSAGE_NOT_READ_YET`。PG 上有 `(user_id, peer_type, peer_id, max_id, date) WHERE event_type='read_history_outbox'` partial index，避免 TDesktop 已读详情查询扫全量 update log。
 
+## Content Read Flow
+
+`messages.readMessageContents` 处理 TDesktop 打开媒体/反应等“内容已读”入口，不等同于 history read 水位：
+
+1. 私聊 incoming media 创建 recipient message box 时置 `media_unread=true`；sender 自己为 false。
+2. 私聊 reaction 写入时，若反应者不是原消息作者，会把原作者 owner 视角的 message box 标记 `reaction_unread=true`，并重算该 dialog 的 `unread_reactions_count`。
+3. `readMessageContents` 在事务内锁定当前 owner 的 exact message boxes，只清理 `media_unread OR reaction_unread` 的行；不可见 id、已删除 id、已经 read 的 id 都不生成新 pts。
+4. 实际清理时为当前 owner 分配连续 user pts，写 `user_update_events(read_message_contents)` 与 `dispatch_outbox`，TL 转换为 `updateReadMessagesContents{messages,pts,pts_count}`。重复调用返回当前 affectedMessages，`pts_count=0`。
+5. 该事件排除当前 auth_key/session，其它在线 session 走 reliable outbox，离线设备通过 `updates.getDifference` 恢复。
+
 ## Edit Flow
 
 `messages.editMessage` 当前只支持私聊文本编辑：
@@ -92,11 +105,15 @@ Redis miss 时分别从 `MAX(user_update_events.pts)` 与 `MAX(message_boxes.box
 
 如果文本和 entities 完全未变化，返回 `MESSAGE_NOT_MODIFIED`；非作者编辑返回 `MESSAGE_AUTHOR_REQUIRED`。
 
+若 peer 已 block 当前用户，私聊 edit 会返回 `EDIT_MESSAGES_FORBIDDEN`，避免修改对方侧已存在的 message box。该 gate 只来自 `contact_blocks`；完整 Telegram privacy keys 暂不扩展。
+
 ## Delete Flow
 
 `messages.deleteMessages` / `messages.deleteHistory` 以 owner 视角软删除 `message_boxes`，不会删除共享 `private_messages` 主体。默认 deleteHistory 清空后如果该 peer 已无可见消息，则删除当前 owner 的 dialog；后续任意新消息会通过正常 send/upsert 路径重建 dialog。`just_clear=true` 对齐 参考实现 语义：清空历史但保留一个空 dialog（当前阶段不生成 `messageActionHistoryClear` 服务消息）。
 
 `revoke=true` 时按 `(message_sender_id, private_message_id)` 找到同一私聊消息在其它 owner 下的 message_box 并软删除。每个受影响 owner 都生成自己的 `updateDeleteMessages`，`message_ids` 是该 owner 视角 box_id，`pts_count=len(message_ids)`，并写入 `user_update_events + dispatch_outbox`。如果删除后仍有可见消息，dialog 的 top/unread 会按剩余消息重算；否则删除 dialog 或在 `just_clear` 下保留空 dialog。
+
+若 `revoke=true` 会影响已 block 当前用户的一方，RPC 层返回 `DELETE_MESSAGES_FORBIDDEN`；`revoke=false` 或本地清理仍只影响当前 owner，可继续执行。
 
 全清也必须让所有被删的 owner 视角 message_id 最终进入 update/difference，但不能合成一个超大 update。`messages.deleteHistory` 单次最多删除 `MaxDeleteHistoryBatch=1000` 条，按 box_id 倒序批量软删并返回 `affectedHistory.offset=1` 表示客户端应继续发起下一批；每一批各自产生一条有界 `updateDeleteMessages`。`messages.deleteMessages` 单次 id 数限制为 `MaxDeleteMessageIDs=1000`，服务端还会丢弃 `<=0` 或超过 TL/PG int4 可表达范围的 id。
 
@@ -106,7 +123,7 @@ Redis miss 时分别从 `MAX(user_update_events.pts)` 与 `MAX(message_boxes.box
 - `messages.search` / `messages.searchGlobal` 当前只覆盖当前 owner 私聊文本搜索；查询仍限定在 `owner_user_id` HASH 分区内，文本条件由 `pg_trgm` GIN 索引兜底。参考实现 的经验，未接外部全文搜索前禁止无索引大表模糊扫；后续群组/频道/全局多 peer 搜索应接专用搜索索引或 FTS。
 - `messages.getDialogs` 以 `user_id` 分区定位当前账号，再按 `top_message_date/top_message_id/peer_id` 做 seek pagination；folder_id=0/1 直接走 `dialogs.folder_id`，folder_id>=2 先取当前账号 `dialog_filters` 后按 include/exclude/contact 规则过滤；`hash` 与 `count` 基于当前筛选后的完整会话集计算。
 - `messages.getDialogFilters` 返回 `dialogFilterDefault` + 当前账号持久化 filters；`messages.updateDialogFilter/updateDialogFiltersOrder/toggleDialogFilterTags` 与 `folders.editPeerFolders` 都是 owner 视角写入，归档只允许 folder_id 0/1，自定义 filters 从 ID 2 开始。
-- `updates.getDifference` 只按 `user_id + pts` 顺序扫描 `user_update_events`，多设备各自的 `(auth_key_id,user_id)` state 只记录消费位置，不参与账号事件归属；离线设备通过同一条 durable log 恢复新消息、已读 inbox/outbox、文本编辑、删除消息、联系人 reset、dialog pinned/order/manual unread、peer settings、dialog filters/order/reload 与 folder peers 变化，置顶顺序、peer settings flags、filter payload 与 folder peers 会随事件负载持久化。
+- `updates.getDifference` 只按 `user_id + pts` 顺序扫描 `user_update_events`，多设备各自的 `(auth_key_id,user_id)` state 只记录消费位置，不参与账号事件归属；离线设备通过同一条 durable log 恢复新消息、已读 inbox/outbox、内容已读、文本编辑、删除消息、联系人 reset、dialog pinned/order/manual unread、peer settings、dialog filters/order/reload 与 folder peers 变化，置顶顺序、peer settings flags、filter payload 与 folder peers 会随事件负载持久化。
 
 ## 参考实现 Comparison
 

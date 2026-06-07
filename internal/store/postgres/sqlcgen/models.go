@@ -320,6 +320,7 @@ type ChannelUnreadMention struct {
 	MessageID    int32
 	TopMessageID int32
 	CreatedAt    pgtype.Timestamptz
+	MediaUnread  bool
 }
 
 type ChannelUpdateEvent struct {
@@ -355,6 +356,13 @@ type Contact struct {
 	NoteEntities     []byte
 	CloseFriend      bool
 	StoriesHidden    bool
+}
+
+type ContactBlock struct {
+	OwnerUserID   int64
+	BlockedUserID int64
+	Date          int32
+	CreatedAt     pgtype.Timestamptz
 }
 
 type Country struct {
@@ -514,6 +522,8 @@ type MessageBox struct {
 	FwdFromName      string
 	FwdDate          int32
 	Media            []byte
+	MediaUnread      bool
+	ReactionUnread   bool
 }
 
 type Photo struct {

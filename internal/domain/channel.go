@@ -347,6 +347,8 @@ type ChannelMessage struct {
 	Reactions    *ChannelMessageReactions
 	Action       *ChannelMessageAction
 	Media        *MessageMedia
+	Mentioned    bool
+	MediaUnread  bool
 	Pts          int
 	Deleted      bool
 }
@@ -825,6 +827,12 @@ type ChannelDifference struct {
 	TooLong      bool
 	Dialog       ChannelDialog
 	Timeout      int
+}
+
+// DirtyChannel identifies an active channel with channel-scoped updates after an account difference date.
+type DirtyChannel struct {
+	ChannelID int64
+	Pts       int
 }
 
 // CreateChannelRequest creates a broadcast channel or megagroup.

@@ -113,6 +113,7 @@ func TestChannelUnreadMentionsArePagedAndCleared(t *testing.T) {
 		ChannelID:      created.Channel.ID,
 		RandomID:       9101,
 		Message:        "hello @friend",
+		Media:          &domain.MessageMedia{Kind: domain.MessageMediaKindDocument},
 		MentionUserIDs: []int64{1002, 1002, 1001},
 		Date:           1700000101,
 	})
@@ -132,6 +133,31 @@ func TestChannelUnreadMentionsArePagedAndCleared(t *testing.T) {
 	}
 	if other.Dialog.UnreadMentions != 0 {
 		t.Fatalf("unmentioned dialog unread mentions = %d, want 0", other.Dialog.UnreadMentions)
+	}
+	history, err := service.GetHistory(ctx, 1002, domain.ChannelHistoryFilter{ChannelID: created.Channel.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("GetHistory mentioned: %v", err)
+	}
+	if len(history.Messages) == 0 || !history.Messages[0].Mentioned || !history.Messages[0].MediaUnread {
+		t.Fatalf("mentioned history = %+v, want mentioned/media_unread flags", history.Messages)
+	}
+	otherHistory, err := service.GetHistory(ctx, 1003, domain.ChannelHistoryFilter{ChannelID: created.Channel.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("GetHistory other: %v", err)
+	}
+	if len(otherHistory.Messages) == 0 || otherHistory.Messages[0].Mentioned || otherHistory.Messages[0].MediaUnread {
+		t.Fatalf("other history = %+v, want no viewer-specific mention flags", otherHistory.Messages)
+	}
+	diff, err := service.GetDifference(ctx, 1002, domain.ChannelDifferenceRequest{
+		ChannelID: created.Channel.ID,
+		Pts:       sent.Event.Pts - 1,
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("GetDifference mentioned: %v", err)
+	}
+	if len(diff.NewMessages) != 1 || !diff.NewMessages[0].Mentioned || !diff.NewMessages[0].MediaUnread {
+		t.Fatalf("mentioned diff = %+v, want mentioned/media_unread flags", diff.NewMessages)
 	}
 	mentions, err := service.GetUnreadMentions(ctx, 1002, domain.ChannelUnreadMentionsFilter{
 		ChannelID: created.Channel.ID,
@@ -158,6 +184,13 @@ func TestChannelUnreadMentionsArePagedAndCleared(t *testing.T) {
 	}
 	if mentions.Count != 0 || len(mentions.Messages) != 0 {
 		t.Fatalf("mentions after read = count %d messages %d, want empty", mentions.Count, len(mentions.Messages))
+	}
+	history, err = service.GetHistory(ctx, 1002, domain.ChannelHistoryFilter{ChannelID: created.Channel.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("GetHistory after read mentions: %v", err)
+	}
+	if len(history.Messages) == 0 || history.Messages[0].Mentioned || history.Messages[0].MediaUnread {
+		t.Fatalf("mentioned history after read = %+v, want mention flags cleared", history.Messages)
 	}
 }
 

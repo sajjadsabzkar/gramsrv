@@ -2808,6 +2808,7 @@ func (r *Router) onMessagesGetSponsoredMessages(ctx context.Context, req *tg.Mes
 
 func (r *Router) onMessagesReadMessageContents(ctx context.Context, ids []int) (*tg.MessagesAffectedMessages, error) {
 	id, _ := AuthKeyIDFrom(ctx)
+	sessionID, _ := SessionIDFrom(ctx)
 	userID, _, err := r.currentUserID(ctx)
 	if err != nil {
 		return nil, internalErr()
@@ -2823,8 +2824,11 @@ func (r *Router) onMessagesReadMessageContents(ctx context.Context, ids []int) (
 	read := domain.ReadMessageContentsResult{OwnerUserID: userID}
 	if r.deps.Messages != nil {
 		read, err = r.deps.Messages.ReadMessageContents(ctx, userID, domain.ReadMessageContentsRequest{
-			OwnerUserID: userID,
-			IDs:         ids,
+			OwnerUserID:     userID,
+			IDs:             ids,
+			Date:            int(r.clock.Now().Unix()),
+			OriginAuthKeyID: id,
+			OriginSessionID: sessionID,
 		})
 		if err != nil {
 			if errors.Is(err, domain.ErrMessageIDInvalid) {
@@ -2833,12 +2837,15 @@ func (r *Router) onMessagesReadMessageContents(ctx context.Context, ids []int) (
 			return nil, internalErr()
 		}
 	}
-	affected, err := r.affectedMessages(ctx, id, userID)
-	if err != nil {
-		return nil, err
+	affected := &tg.MessagesAffectedMessages{Pts: read.Event.Pts, PtsCount: read.Event.PtsCount}
+	if read.Event.Pts == 0 {
+		affected, err = r.affectedMessages(ctx, id, userID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if contentIDs := readMessageContentIDs(read.MessageIDs); len(contentIDs) > 0 {
-		r.pushUserUpdates(ctx, userID, &tg.Updates{
+		r.pushUserUpdatesIfNoReliableDispatch(ctx, userID, &tg.Updates{
 			Updates: []tg.UpdateClass{&tg.UpdateReadMessagesContents{
 				Messages: contentIDs,
 				Pts:      affected.Pts,
@@ -4378,6 +4385,10 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 		if r.deps.Channels == nil || r.deps.Messages == nil {
 			return nil, peerIDInvalidErr()
 		}
+		recipientBlocked, err := r.peerBlocksUser(ctx, userID, toPeer.ID)
+		if err != nil {
+			return nil, err
+		}
 		sources, err := r.forwardSources(ctx, userID, fromPeer, req.ID)
 		if err != nil {
 			return nil, messageForwardErr(err)
@@ -4391,19 +4402,20 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 				forward = nil
 			}
 			sent, err := r.deps.Messages.SendPrivateText(ctx, userID, domain.SendPrivateTextRequest{
-				SenderUserID:    userID,
-				RecipientUserID: toPeer.ID,
-				RandomID:        req.RandomID[i],
-				Message:         source.body,
-				Entities:        source.entities,
-				Media:           source.media,
-				Silent:          req.Silent,
-				NoForwards:      req.Noforwards,
-				ReplyTo:         replyTo,
-				Forward:         forward,
-				Date:            int(r.clock.Now().Unix()),
-				OriginAuthKeyID: authKeyID,
-				OriginSessionID: sessionID,
+				SenderUserID:     userID,
+				RecipientUserID:  toPeer.ID,
+				RandomID:         req.RandomID[i],
+				Message:          source.body,
+				Entities:         source.entities,
+				Media:            source.media,
+				Silent:           req.Silent,
+				NoForwards:       req.Noforwards,
+				ReplyTo:          replyTo,
+				Forward:          forward,
+				Date:             int(r.clock.Now().Unix()),
+				OriginAuthKeyID:  authKeyID,
+				OriginSessionID:  sessionID,
+				RecipientBlocked: recipientBlocked,
 			})
 			if err != nil {
 				return nil, messageForwardErr(err)
@@ -4421,19 +4433,24 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 	}
 	sessionID, _ := SessionIDFrom(ctx)
 	authKeyID, _ := AuthKeyIDFrom(ctx)
+	recipientBlocked, err := r.peerBlocksUser(ctx, userID, toPeer.ID)
+	if err != nil {
+		return nil, err
+	}
 	res, err := r.deps.Messages.ForwardPrivateMessages(ctx, userID, domain.ForwardPrivateMessagesRequest{
-		OwnerUserID:     userID,
-		FromPeer:        fromPeer,
-		ToUserID:        toPeer.ID,
-		MessageIDs:      append([]int(nil), req.ID...),
-		RandomIDs:       append([]int64(nil), req.RandomID...),
-		Silent:          req.Silent,
-		NoForwards:      req.Noforwards,
-		DropAuthor:      req.DropAuthor,
-		ReplyTo:         replyTo,
-		Date:            int(r.clock.Now().Unix()),
-		OriginAuthKeyID: authKeyID,
-		OriginSessionID: sessionID,
+		OwnerUserID:      userID,
+		FromPeer:         fromPeer,
+		ToUserID:         toPeer.ID,
+		MessageIDs:       append([]int(nil), req.ID...),
+		RandomIDs:        append([]int64(nil), req.RandomID...),
+		Silent:           req.Silent,
+		NoForwards:       req.Noforwards,
+		DropAuthor:       req.DropAuthor,
+		ReplyTo:          replyTo,
+		Date:             int(r.clock.Now().Unix()),
+		OriginAuthKeyID:  authKeyID,
+		OriginSessionID:  sessionID,
+		RecipientBlocked: recipientBlocked,
 	})
 	if err != nil {
 		return nil, messageForwardErr(err)
@@ -4641,6 +4658,13 @@ func (r *Router) onMessagesEditMessage(ctx context.Context, req *tg.MessagesEdit
 	if peer.Type != domain.PeerTypeUser || r.deps.Messages == nil {
 		return nil, peerIDInvalidErr()
 	}
+	blocked, err := r.peerBlocksUser(ctx, userID, peer.ID)
+	if err != nil {
+		return nil, err
+	}
+	if blocked {
+		return nil, messageEditForbiddenErr()
+	}
 	sessionID, _ := SessionIDFrom(ctx)
 	authKeyID, _ := AuthKeyIDFrom(ctx)
 	res, err := r.deps.Messages.EditMessage(ctx, userID, domain.EditMessageRequest{
@@ -4818,6 +4842,19 @@ func (r *Router) onMessagesDeleteMessages(ctx context.Context, req *tg.MessagesD
 	if len(req.ID) > domain.MaxDeleteMessageIDs {
 		return nil, limitInvalidErr()
 	}
+	if req.GetRevoke() {
+		list, err := r.deps.Messages.GetMessages(ctx, userID, req.ID)
+		if err != nil {
+			return nil, internalErr()
+		}
+		blocked, err := r.messagesTouchBlockedPeer(ctx, userID, list.Messages)
+		if err != nil {
+			return nil, err
+		}
+		if blocked {
+			return nil, messageDeleteForbiddenErr()
+		}
+	}
 	sessionID, _ := SessionIDFrom(ctx)
 	res, err := r.deps.Messages.DeleteMessages(ctx, userID, domain.DeleteMessagesRequest{
 		OwnerUserID:     userID,
@@ -4891,6 +4928,15 @@ func (r *Router) onMessagesDeleteHistory(ctx context.Context, req *tg.MessagesDe
 	}
 	if r.deps.Messages == nil {
 		return r.affectedHistory(ctx, authKeyID, userID, 0)
+	}
+	if req.GetRevoke() {
+		blocked, err := r.peerBlocksUser(ctx, userID, peer.ID)
+		if err != nil {
+			return nil, err
+		}
+		if blocked {
+			return nil, messageDeleteForbiddenErr()
+		}
 	}
 	sessionID, _ := SessionIDFrom(ctx)
 	res, err := r.deps.Messages.DeleteHistory(ctx, userID, domain.DeleteHistoryRequest{
@@ -4970,6 +5016,38 @@ func messageSendErr(err error) error {
 	default:
 		return internalErr()
 	}
+}
+
+func (r *Router) peerBlocksUser(ctx context.Context, userID, peerUserID int64) (bool, error) {
+	if userID == 0 || peerUserID == 0 || userID == peerUserID || r.deps.Contacts == nil {
+		return false, nil
+	}
+	blocked, err := r.deps.Contacts.IsBlocked(ctx, peerUserID, userID)
+	if err != nil {
+		return false, internalErr()
+	}
+	return blocked, nil
+}
+
+func (r *Router) messagesTouchBlockedPeer(ctx context.Context, userID int64, messages []domain.Message) (bool, error) {
+	seen := make(map[int64]struct{}, len(messages))
+	for _, msg := range messages {
+		if msg.Peer.Type != domain.PeerTypeUser || msg.Peer.ID == 0 {
+			continue
+		}
+		if _, ok := seen[msg.Peer.ID]; ok {
+			continue
+		}
+		seen[msg.Peer.ID] = struct{}{}
+		blocked, err := r.peerBlocksUser(ctx, userID, msg.Peer.ID)
+		if err != nil {
+			return false, err
+		}
+		if blocked {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func messageForwardErr(err error) error {

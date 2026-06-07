@@ -349,6 +349,16 @@ func tgUpdatesDifference(diff domain.UpdateDifference) tg.UpdatesDifferenceClass
 			}
 		}
 	}
+	for _, nudge := range diff.ChannelNudges {
+		if nudge.ChannelID == 0 {
+			continue
+		}
+		update := &tg.UpdateChannelTooLong{ChannelID: nudge.ChannelID}
+		if nudge.Pts > 0 {
+			update.SetPts(nudge.Pts)
+		}
+		out.OtherUpdates = append(out.OtherUpdates, update)
+	}
 	// Partial：连续事件被 limit 截断、后面还有 → updates.differenceSlice，客户端据 IntermediateState 续拉。
 	if diff.Partial {
 		return &tg.UpdatesDifferenceSlice{
@@ -561,6 +571,15 @@ func tgOtherUpdateFromEvent(event domain.UpdateEvent) tg.UpdateClass {
 		}
 	case domain.UpdateEventReadHistoryOutbox:
 		return tgReadHistoryOutbox(event)
+	case domain.UpdateEventReadMessageContents:
+		if len(event.MessageIDs) == 0 {
+			return nil
+		}
+		return &tg.UpdateReadMessagesContents{
+			Messages: append([]int(nil), event.MessageIDs...),
+			Pts:      event.Pts,
+			PtsCount: event.PtsCount,
+		}
 	case domain.UpdateEventEditMessage:
 		msg := tgMessage(event.Message)
 		if msg == nil {
@@ -856,12 +875,13 @@ func tgMessage(m domain.Message) tg.MessageClass {
 		return nil
 	}
 	msg := &tg.Message{
-		Out:      m.Out,
-		ID:       m.ID,
-		PeerID:   peer,
-		Date:     m.Date,
-		Message:  m.Body,
-		Entities: tgMessageEntities(m.Entities),
+		Out:         m.Out,
+		MediaUnread: m.MediaUnread,
+		ID:          m.ID,
+		PeerID:      peer,
+		Date:        m.Date,
+		Message:     m.Body,
+		Entities:    tgMessageEntities(m.Entities),
 	}
 	if m.EditDate != 0 {
 		msg.SetEditDate(m.EditDate)
@@ -993,16 +1013,18 @@ func tgChannelMessage(viewerUserID int64, m domain.ChannelMessage) tg.MessageCla
 		return msg
 	}
 	msg := &tg.Message{
-		Out:        outgoing,
-		Silent:     m.Silent,
-		Post:       m.Post,
-		Noforwards: m.NoForwards,
-		ID:         m.ID,
-		FromID:     from,
-		PeerID:     peer,
-		Date:       m.Date,
-		Message:    m.Body,
-		Entities:   tgMessageEntities(m.Entities),
+		Out:         outgoing,
+		Silent:      m.Silent,
+		Post:        m.Post,
+		Noforwards:  m.NoForwards,
+		Mentioned:   m.Mentioned,
+		MediaUnread: m.MediaUnread,
+		ID:          m.ID,
+		FromID:      from,
+		PeerID:      peer,
+		Date:        m.Date,
+		Message:     m.Body,
+		Entities:    tgMessageEntities(m.Entities),
 	}
 	if m.EditDate != 0 {
 		msg.SetEditDate(m.EditDate)

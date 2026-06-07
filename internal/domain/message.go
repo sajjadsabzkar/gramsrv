@@ -73,24 +73,26 @@ type MessageEntity struct {
 
 // Message 是账号视角下的一条私聊消息。
 type Message struct {
-	ID          int   // 当前 owner 视角下的 message box id，暴露给 Telegram 客户端。
-	UID         int64 // 共享私聊消息主体 id，不暴露给客户端。
-	RandomID    int64
-	OwnerUserID int64
-	Peer        Peer
-	From        Peer
-	Date        int
-	EditDate    int
-	Out         bool
-	Silent      bool
-	NoForwards  bool
-	Body        string
-	Entities    []MessageEntity
-	ReplyTo     *MessageReply
-	Forward     *MessageForward
-	Reactions   *ChannelMessageReactions
-	Pts         int
-	Media       *MessageMedia
+	ID             int   // 当前 owner 视角下的 message box id，暴露给 Telegram 客户端。
+	UID            int64 // 共享私聊消息主体 id，不暴露给客户端。
+	RandomID       int64
+	OwnerUserID    int64
+	Peer           Peer
+	From           Peer
+	Date           int
+	EditDate       int
+	Out            bool
+	Silent         bool
+	NoForwards     bool
+	Body           string
+	Entities       []MessageEntity
+	ReplyTo        *MessageReply
+	Forward        *MessageForward
+	Reactions      *ChannelMessageReactions
+	Pts            int
+	Media          *MessageMedia
+	MediaUnread    bool
+	ReactionUnread bool
 }
 
 // MessageReply describes a message reply/thread header without depending on TL types.
@@ -139,19 +141,20 @@ type MessageFilter struct {
 
 // SendPrivateTextRequest 是私聊文本/媒体发送命令。
 type SendPrivateTextRequest struct {
-	SenderUserID    int64
-	RecipientUserID int64
-	RandomID        int64
-	Message         string
-	Entities        []MessageEntity
-	Media           *MessageMedia
-	Silent          bool
-	NoForwards      bool
-	ReplyTo         *MessageReply
-	Forward         *MessageForward
-	Date            int
-	OriginAuthKeyID [8]byte
-	OriginSessionID int64
+	SenderUserID     int64
+	RecipientUserID  int64
+	RandomID         int64
+	Message          string
+	Entities         []MessageEntity
+	Media            *MessageMedia
+	Silent           bool
+	NoForwards       bool
+	ReplyTo          *MessageReply
+	Forward          *MessageForward
+	Date             int
+	OriginAuthKeyID  [8]byte
+	OriginSessionID  int64
+	RecipientBlocked bool
 }
 
 // SendPrivateTextResult 描述一次私聊文本发送的双端结果。
@@ -189,18 +192,19 @@ type PrivateMessageReactionsResult struct {
 
 // ForwardPrivateMessagesRequest 是私聊文本消息转发命令。
 type ForwardPrivateMessagesRequest struct {
-	OwnerUserID     int64
-	FromPeer        Peer
-	ToUserID        int64
-	MessageIDs      []int
-	RandomIDs       []int64
-	Silent          bool
-	NoForwards      bool
-	DropAuthor      bool
-	ReplyTo         *MessageReply
-	Date            int
-	OriginAuthKeyID [8]byte
-	OriginSessionID int64
+	OwnerUserID      int64
+	FromPeer         Peer
+	ToUserID         int64
+	MessageIDs       []int
+	RandomIDs        []int64
+	Silent           bool
+	NoForwards       bool
+	DropAuthor       bool
+	ReplyTo          *MessageReply
+	Date             int
+	OriginAuthKeyID  [8]byte
+	OriginSessionID  int64
+	RecipientBlocked bool
 }
 
 // ForwardPrivateMessagesResult 描述一次私聊转发的 owner 维度结果。
@@ -238,14 +242,18 @@ type ReadHistoryResult struct {
 
 // ReadMessageContentsRequest marks media/mention contents as read for exact owner-visible messages.
 type ReadMessageContentsRequest struct {
-	OwnerUserID int64
-	IDs         []int
+	OwnerUserID     int64
+	IDs             []int
+	Date            int
+	OriginAuthKeyID [8]byte
+	OriginSessionID int64
 }
 
-// ReadMessageContentsResult contains owner-visible message IDs that existed and can be synced.
+// ReadMessageContentsResult contains owner-visible message IDs whose content unread state changed.
 type ReadMessageContentsResult struct {
 	OwnerUserID int64
 	MessageIDs  []int
+	Event       UpdateEvent
 }
 
 // OutboxReadDateRequest 是 messages.getOutboxReadDate 查询。

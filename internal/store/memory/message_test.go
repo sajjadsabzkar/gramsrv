@@ -120,6 +120,31 @@ func TestMessageStorePrivateMessageReactionsAreSharedAcrossOwnerBoxes(t *testing
 	if got := aliceReactions.Messages[0].Reactions.Recent; len(got) != 1 || got[0].UserID != bobID || !got[0].Big || got[0].My {
 		t.Fatalf("alice recent reactions = %+v, want bob non-my big reaction", got)
 	}
+	aliceBox, err := messages.GetByIDs(ctx, aliceID, []int{sent.SenderMessage.ID})
+	if err != nil {
+		t.Fatalf("alice GetByIDs after reaction: %v", err)
+	}
+	if len(aliceBox.Messages) != 1 || !aliceBox.Messages[0].ReactionUnread {
+		t.Fatalf("alice box after reaction = %+v, want reaction_unread", aliceBox.Messages)
+	}
+	read, err := messages.ReadMessageContents(ctx, domain.ReadMessageContentsRequest{
+		OwnerUserID: aliceID,
+		IDs:         []int{sent.SenderMessage.ID},
+		Date:        1700000210,
+	})
+	if err != nil {
+		t.Fatalf("ReadMessageContents reaction: %v", err)
+	}
+	if !reflect.DeepEqual(read.MessageIDs, []int{sent.SenderMessage.ID}) || read.Event.Type != domain.UpdateEventReadMessageContents || read.Event.Pts == 0 {
+		t.Fatalf("read reaction contents = %+v, want one read_message_contents event", read)
+	}
+	aliceBox, err = messages.GetByIDs(ctx, aliceID, []int{sent.SenderMessage.ID})
+	if err != nil {
+		t.Fatalf("alice GetByIDs after read reaction: %v", err)
+	}
+	if len(aliceBox.Messages) != 1 || aliceBox.Messages[0].ReactionUnread {
+		t.Fatalf("alice box after read reaction = %+v, want reaction_unread cleared", aliceBox.Messages)
+	}
 
 	bobReactions, err := messages.GetMessageReactions(ctx, domain.PrivateMessageReactionsRequest{
 		OwnerUserID: bobID,
@@ -344,7 +369,7 @@ func TestMessageStoreReadHistoryEmitsInboxAndOutboxReceipts(t *testing.T) {
 	}
 }
 
-func TestMessageStoreReadMessageContentsReturnsExistingOwnerIDs(t *testing.T) {
+func TestMessageStoreReadMessageContentsClearsUnreadContentOnce(t *testing.T) {
 	ctx := context.Background()
 	messages := NewMessageStore()
 	sent, err := messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{
@@ -352,20 +377,39 @@ func TestMessageStoreReadMessageContentsReturnsExistingOwnerIDs(t *testing.T) {
 		RecipientUserID: 1002,
 		RandomID:        88,
 		Message:         "voice placeholder",
+		Media:           &domain.MessageMedia{Kind: domain.MessageMediaKindDocument, Voice: true},
 		Date:            1700000300,
 	})
 	if err != nil {
 		t.Fatalf("SendPrivateText: %v", err)
 	}
+	if !sent.RecipientMessage.MediaUnread {
+		t.Fatalf("recipient MediaUnread = false, want true for incoming media")
+	}
 	got, err := messages.ReadMessageContents(ctx, domain.ReadMessageContentsRequest{
 		OwnerUserID: 1002,
 		IDs:         []int{sent.RecipientMessage.ID, domain.MaxMessageBoxID},
+		Date:        1700000400,
 	})
 	if err != nil {
 		t.Fatalf("ReadMessageContents: %v", err)
 	}
 	if !reflect.DeepEqual(got.MessageIDs, []int{sent.RecipientMessage.ID}) {
-		t.Fatalf("MessageIDs = %v, want existing recipient id", got.MessageIDs)
+		t.Fatalf("MessageIDs = %v, want unread recipient id", got.MessageIDs)
+	}
+	if got.Event.Type != domain.UpdateEventReadMessageContents || got.Event.Pts == 0 || got.Event.PtsCount != 1 {
+		t.Fatalf("Event = %+v, want read_message_contents pts update", got.Event)
+	}
+	repeated, err := messages.ReadMessageContents(ctx, domain.ReadMessageContentsRequest{
+		OwnerUserID: 1002,
+		IDs:         []int{sent.RecipientMessage.ID},
+		Date:        1700000500,
+	})
+	if err != nil {
+		t.Fatalf("ReadMessageContents repeat: %v", err)
+	}
+	if len(repeated.MessageIDs) != 0 || repeated.Event.Pts != 0 {
+		t.Fatalf("repeat = %+v, want no affected messages and no pts", repeated)
 	}
 	if _, err := messages.ReadMessageContents(ctx, domain.ReadMessageContentsRequest{
 		OwnerUserID: 1002,

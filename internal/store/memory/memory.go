@@ -242,13 +242,17 @@ func (s *TempAuthKeyBindingStore) GetByTemp(_ context.Context, tempAuthKeyID [8]
 
 // ContactStore 是 store.ContactStore 的内存实现。
 type ContactStore struct {
-	mu sync.RWMutex
-	m  map[int64]domain.ContactList
+	mu     sync.RWMutex
+	m      map[int64]domain.ContactList
+	blocks map[int64]map[int64]domain.BlockedContact
 }
 
 // NewContactStore 创建内存 ContactStore。
 func NewContactStore() *ContactStore {
-	return &ContactStore{m: make(map[int64]domain.ContactList)}
+	return &ContactStore{
+		m:      make(map[int64]domain.ContactList),
+		blocks: make(map[int64]map[int64]domain.BlockedContact),
+	}
 }
 
 func (s *ContactStore) ListByUser(_ context.Context, userID int64) (domain.ContactList, error) {
@@ -398,6 +402,68 @@ func (s *ContactStore) Delete(_ context.Context, userID int64, contactUserIDs []
 	list.Hash = contactListHash(list.Contacts)
 	s.m[userID] = list
 	return deleted, nil
+}
+
+func (s *ContactStore) Block(_ context.Context, userID, blockedUserID int64, date int) (bool, error) {
+	if userID == 0 || blockedUserID == 0 || userID == blockedUserID {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.blocks[userID] == nil {
+		s.blocks[userID] = make(map[int64]domain.BlockedContact)
+	}
+	_, existed := s.blocks[userID][blockedUserID]
+	s.blocks[userID][blockedUserID] = domain.BlockedContact{
+		User: domain.User{ID: blockedUserID},
+		Date: date,
+	}
+	return !existed, nil
+}
+
+func (s *ContactStore) Unblock(_ context.Context, userID, blockedUserID int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.blocks[userID] == nil {
+		return false, nil
+	}
+	_, existed := s.blocks[userID][blockedUserID]
+	delete(s.blocks[userID], blockedUserID)
+	return existed, nil
+}
+
+func (s *ContactStore) IsBlocked(_ context.Context, userID, blockedUserID int64) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, blocked := s.blocks[userID][blockedUserID]
+	return blocked, nil
+}
+
+func (s *ContactStore) ListBlocked(_ context.Context, userID int64, offset, limit int) (domain.BlockedContactList, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]domain.BlockedContact, 0, len(s.blocks[userID]))
+	for _, item := range s.blocks[userID] {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Date == items[j].Date {
+			return items[i].User.ID > items[j].User.ID
+		}
+		return items[i].Date > items[j].Date
+	})
+	total := len(items)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(items) {
+		return domain.BlockedContactList{Count: total}, nil
+	}
+	if limit <= 0 || limit > len(items)-offset {
+		limit = len(items) - offset
+	}
+	out := append([]domain.BlockedContact(nil), items[offset:offset+limit]...)
+	return domain.BlockedContactList{Blocked: out, Count: total}, nil
 }
 
 // SaveList 保存一份用户通讯录，供测试和本地替身使用。
@@ -956,21 +1022,30 @@ func (s *MessageStore) SendPrivateText(_ context.Context, req domain.SendPrivate
 		Forward:     cloneMessageForward(req.Forward),
 		Pts:         s.nextPtsLocked(req.SenderUserID),
 	}
-	recipient := sender
-	if req.SenderUserID != req.RecipientUserID {
+	recipient := domain.Message{}
+	if req.SenderUserID == req.RecipientUserID {
+		recipient = sender
+	}
+	if req.SenderUserID != req.RecipientUserID && !req.RecipientBlocked {
+		recipient = sender
 		recipient.ID = s.nextBoxIDLocked(req.RecipientUserID)
 		recipient.OwnerUserID = req.RecipientUserID
 		recipient.Peer = domain.Peer{Type: domain.PeerTypeUser, ID: req.SenderUserID}
 		recipient.Out = false
 		recipient.ReplyTo = cloneMessageReply(recipientReply)
 		recipient.Pts = s.nextPtsLocked(req.RecipientUserID)
+		recipient.MediaUnread = !req.Media.IsZero()
 	}
 	s.m[req.SenderUserID] = append(s.m[req.SenderUserID], sender)
-	if req.SenderUserID != req.RecipientUserID {
+	if req.SenderUserID != req.RecipientUserID && !req.RecipientBlocked {
 		s.m[req.RecipientUserID] = append(s.m[req.RecipientUserID], recipient)
 	}
 	if s.dialogs != nil {
-		s.upsertMemoryDialogsLocked(sender, recipient)
+		if recipient.ID != 0 {
+			s.upsertMemoryDialogsLocked(sender, recipient)
+		} else {
+			s.upsertMemoryDialogsLocked(sender, sender)
+		}
 	}
 	return domain.SendPrivateTextResult{
 		SenderMessage:    cloneMessage(sender),
@@ -1078,18 +1153,19 @@ func (s *MessageStore) ForwardPrivateMessages(ctx context.Context, req domain.Fo
 			}
 		}
 		sent, err := s.SendPrivateText(ctx, domain.SendPrivateTextRequest{
-			SenderUserID:    req.OwnerUserID,
-			RecipientUserID: req.ToUserID,
-			RandomID:        req.RandomIDs[i],
-			Message:         source.Body,
-			Entities:        append([]domain.MessageEntity(nil), source.Entities...),
-			Silent:          req.Silent,
-			NoForwards:      req.NoForwards,
-			ReplyTo:         req.ReplyTo,
-			Forward:         forward,
-			Date:            req.Date,
-			OriginAuthKeyID: req.OriginAuthKeyID,
-			OriginSessionID: req.OriginSessionID,
+			SenderUserID:     req.OwnerUserID,
+			RecipientUserID:  req.ToUserID,
+			RandomID:         req.RandomIDs[i],
+			Message:          source.Body,
+			Entities:         append([]domain.MessageEntity(nil), source.Entities...),
+			Silent:           req.Silent,
+			NoForwards:       req.NoForwards,
+			ReplyTo:          req.ReplyTo,
+			Forward:          forward,
+			Date:             req.Date,
+			OriginAuthKeyID:  req.OriginAuthKeyID,
+			OriginSessionID:  req.OriginSessionID,
+			RecipientBlocked: req.RecipientBlocked,
 		})
 		if err != nil {
 			return res, err
@@ -1277,14 +1353,52 @@ func (s *MessageStore) ReadMessageContents(_ context.Context, req domain.ReadMes
 	if len(wanted) == 0 {
 		return res, nil
 	}
-	s.mu.RLock()
-	for _, msg := range s.m[req.OwnerUserID] {
-		if _, ok := wanted[msg.ID]; ok {
-			res.MessageIDs = append(res.MessageIDs, msg.ID)
-		}
+	if req.Date == 0 {
+		req.Date = int(time.Now().Unix())
 	}
-	s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	affectedPeers := make(map[domain.Peer]struct{})
+	for i := range s.m[req.OwnerUserID] {
+		msg := &s.m[req.OwnerUserID][i]
+		if _, ok := wanted[msg.ID]; !ok {
+			continue
+		}
+		if !msg.MediaUnread && !msg.ReactionUnread {
+			continue
+		}
+		if msg.ReactionUnread && msg.Peer.ID != 0 {
+			affectedPeers[msg.Peer] = struct{}{}
+		}
+		msg.MediaUnread = false
+		msg.ReactionUnread = false
+		res.MessageIDs = append(res.MessageIDs, msg.ID)
+	}
 	sort.Ints(res.MessageIDs)
+	if len(res.MessageIDs) == 0 {
+		return res, nil
+	}
+	if s.dialogs != nil && len(affectedPeers) > 0 {
+		s.dialogs.mu.Lock()
+		list := s.dialogs.m[req.OwnerUserID]
+		for i := range list.Dialogs {
+			if _, ok := affectedPeers[list.Dialogs[i].Peer]; !ok {
+				continue
+			}
+			list.Dialogs[i].UnreadReactions = s.countPrivateUnreadReactionsLocked(req.OwnerUserID, list.Dialogs[i].Peer)
+		}
+		s.dialogs.m[req.OwnerUserID] = list
+		s.dialogs.mu.Unlock()
+	}
+	pts := s.nextPtsNLocked(req.OwnerUserID, len(res.MessageIDs))
+	res.Event = domain.UpdateEvent{
+		UserID:     req.OwnerUserID,
+		Type:       domain.UpdateEventReadMessageContents,
+		Pts:        pts,
+		PtsCount:   len(res.MessageIDs),
+		Date:       req.Date,
+		MessageIDs: append([]int(nil), res.MessageIDs...),
+	}
 	return res, nil
 }
 
@@ -1354,6 +1468,27 @@ func (s *MessageStore) SetMessageReactions(_ context.Context, req domain.SetPriv
 		delete(s.privateReactions[target.UID], req.UserID)
 	} else {
 		s.privateReactions[target.UID][req.UserID] = rows
+	}
+	if target.From.ID != 0 && target.From.ID != req.UserID {
+		for i := range s.m[target.From.ID] {
+			if s.m[target.From.ID][i].UID != target.UID {
+				continue
+			}
+			s.m[target.From.ID][i].ReactionUnread = len(rows) > 0
+			if s.dialogs != nil {
+				s.dialogs.mu.Lock()
+				list := s.dialogs.m[target.From.ID]
+				peer := domain.Peer{Type: domain.PeerTypeUser, ID: req.UserID}
+				for j := range list.Dialogs {
+					if list.Dialogs[j].Peer == peer {
+						list.Dialogs[j].UnreadReactions = s.countPrivateUnreadReactionsLocked(target.From.ID, peer)
+					}
+				}
+				s.dialogs.m[target.From.ID] = list
+				s.dialogs.mu.Unlock()
+			}
+			break
+		}
 	}
 	return s.privateReactionResultLocked(target.UID), nil
 }
@@ -1583,6 +1718,16 @@ func (s *MessageStore) nextPtsNLocked(userID int64, count int) int {
 	next := s.nextPts[userID] + count
 	s.nextPts[userID] = next
 	return next
+}
+
+func (s *MessageStore) countPrivateUnreadReactionsLocked(ownerUserID int64, peer domain.Peer) int {
+	count := 0
+	for _, msg := range s.m[ownerUserID] {
+		if msg.Peer == peer && msg.ReactionUnread {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *MessageStore) upsertMemoryDialogsLocked(sender, recipient domain.Message) {

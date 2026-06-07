@@ -1375,6 +1375,17 @@ func (s *Service) ActiveChannelIDsForUser(ctx context.Context, userID, afterChan
 	return s.channels.ListActiveChannelIDsForUser(ctx, userID, afterChannelID, limit)
 }
 
+// DirtyActiveChannelsForUser pages active joined channels with channel events after sinceDate.
+func (s *Service) DirtyActiveChannelsForUser(ctx context.Context, userID int64, sinceDate int, afterChannelID int64, limit int) ([]domain.DirtyChannel, error) {
+	if s == nil || s.channels == nil || userID == 0 || sinceDate <= 0 || afterChannelID < 0 {
+		return nil, domain.ErrChannelInvalid
+	}
+	if limit <= 0 || limit > domain.MaxChannelDifferenceLimit {
+		limit = domain.MaxChannelDifferenceLimit
+	}
+	return s.channels.ListDirtyActiveChannelsForUser(ctx, userID, sinceDate, afterChannelID, limit)
+}
+
 // ActiveMemberIDs returns a bounded list for transient online fanout such as typing.
 func (s *Service) ActiveMemberIDs(ctx context.Context, userID, channelID int64, limit int) ([]int64, error) {
 	if s == nil || s.channels == nil || userID == 0 || channelID == 0 {

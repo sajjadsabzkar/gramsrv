@@ -366,6 +366,118 @@ func contactFromFields(id, accessHash int64, phone, firstName, lastName, usernam
 	}
 }
 
+func (s *ContactStore) Block(ctx context.Context, userID, blockedUserID int64, date int) (bool, error) {
+	if userID == 0 || blockedUserID == 0 || userID == blockedUserID {
+		return false, nil
+	}
+	tag, err := s.db.Exec(ctx, `
+INSERT INTO contact_blocks (owner_user_id, blocked_user_id, date)
+VALUES ($1, $2, $3)
+ON CONFLICT (owner_user_id, blocked_user_id) DO UPDATE SET
+  date = EXCLUDED.date,
+  created_at = contact_blocks.created_at`, userID, blockedUserID, date)
+	if err != nil {
+		return false, fmt.Errorf("block contact: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (s *ContactStore) Unblock(ctx context.Context, userID, blockedUserID int64) (bool, error) {
+	if userID == 0 || blockedUserID == 0 {
+		return false, nil
+	}
+	tag, err := s.db.Exec(ctx, `
+DELETE FROM contact_blocks
+WHERE owner_user_id = $1
+  AND blocked_user_id = $2`, userID, blockedUserID)
+	if err != nil {
+		return false, fmt.Errorf("unblock contact: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (s *ContactStore) IsBlocked(ctx context.Context, userID, blockedUserID int64) (bool, error) {
+	if userID == 0 || blockedUserID == 0 {
+		return false, nil
+	}
+	var blocked bool
+	if err := s.db.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1
+  FROM contact_blocks
+  WHERE owner_user_id = $1
+    AND blocked_user_id = $2
+)`, userID, blockedUserID).Scan(&blocked); err != nil {
+		return false, fmt.Errorf("check contact block: %w", err)
+	}
+	return blocked, nil
+}
+
+func (s *ContactStore) ListBlocked(ctx context.Context, userID int64, offset, limit int) (domain.BlockedContactList, error) {
+	if userID == 0 {
+		return domain.BlockedContactList{}, nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	var count int
+	if err := s.db.QueryRow(ctx, `
+SELECT COUNT(*)::int
+FROM contact_blocks
+WHERE owner_user_id = $1`, userID).Scan(&count); err != nil {
+		return domain.BlockedContactList{}, fmt.Errorf("count blocked contacts: %w", err)
+	}
+	rows, err := s.db.Query(ctx, `
+SELECT
+  b.blocked_user_id,
+  b.date,
+  u.access_hash,
+  u.phone,
+  u.first_name,
+  u.last_name,
+  u.username,
+  u.country_code,
+  u.verified,
+  u.support,
+  u.last_seen_at
+FROM contact_blocks b
+JOIN users u ON u.id = b.blocked_user_id
+WHERE b.owner_user_id = $1
+ORDER BY b.date DESC, b.blocked_user_id DESC
+OFFSET $2
+LIMIT $3`, userID, offset, limit)
+	if err != nil {
+		return domain.BlockedContactList{}, fmt.Errorf("list blocked contacts: %w", err)
+	}
+	defer rows.Close()
+	out := domain.BlockedContactList{Count: count, Blocked: make([]domain.BlockedContact, 0, limit)}
+	for rows.Next() {
+		var item domain.BlockedContact
+		var lastSeen int64
+		if err := rows.Scan(
+			&item.User.ID,
+			&item.Date,
+			&item.User.AccessHash,
+			&item.User.Phone,
+			&item.User.FirstName,
+			&item.User.LastName,
+			&item.User.Username,
+			&item.User.CountryCode,
+			&item.User.Verified,
+			&item.User.Support,
+			&lastSeen,
+		); err != nil {
+			return domain.BlockedContactList{}, err
+		}
+		item.User.LastSeenAt = int(lastSeen)
+		out.Blocked = append(out.Blocked, item)
+	}
+	return out, rows.Err()
+}
+
 func contactListHash(contacts []domain.Contact) int64 {
 	if len(contacts) == 0 {
 		return 0

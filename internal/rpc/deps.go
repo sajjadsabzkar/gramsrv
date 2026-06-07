@@ -138,6 +138,10 @@ type ContactsService interface {
 	DeleteContacts(ctx context.Context, userID int64, contactUserIDs []int64) (int, error)
 	UpdateContactNote(ctx context.Context, userID, contactUserID int64, note string, entities []domain.MessageEntity) (domain.Contact, error)
 	GetPeerSettings(ctx context.Context, userID int64, peer domain.Peer) (domain.PeerSettings, error)
+	BlockContact(ctx context.Context, userID, peerUserID int64, date int) (bool, error)
+	UnblockContact(ctx context.Context, userID, peerUserID int64) (bool, error)
+	IsBlocked(ctx context.Context, userID, peerUserID int64) (bool, error)
+	GetBlocked(ctx context.Context, userID int64, offset, limit int) (domain.BlockedContactList, error)
 }
 
 // DialogsService 抽象会话列表查询。
@@ -278,6 +282,7 @@ type ChannelsService interface {
 	GetMessageReadParticipants(ctx context.Context, userID int64, req domain.ChannelReadParticipantsRequest) (domain.ChannelReadParticipantsResult, error)
 	GetDifference(ctx context.Context, userID int64, req domain.ChannelDifferenceRequest) (domain.ChannelDifference, error)
 	ActiveChannelIDsForUser(ctx context.Context, userID, afterChannelID int64, limit int) ([]int64, error)
+	DirtyActiveChannelsForUser(ctx context.Context, userID int64, sinceDate int, afterChannelID int64, limit int) ([]domain.DirtyChannel, error)
 	ActiveMemberIDs(ctx context.Context, userID, channelID int64, limit int) ([]int64, error)
 	InviteAdminMemberIDs(ctx context.Context, channelID int64, limit int) ([]int64, error)
 	FilterActiveMemberIDs(ctx context.Context, channelID int64, userIDs []int64) ([]int64, error)

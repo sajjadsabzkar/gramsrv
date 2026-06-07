@@ -63,11 +63,30 @@ func (r *Router) onUpdatesGetDifference(ctx context.Context, req *tg.UpdatesGetD
 		return nil, internalErr()
 	}
 	r.markSessionReceivesUpdates(ctx, userID)
-	if len(st.Events) == 0 {
+	st.ChannelNudges = r.accountChannelDifferenceNudges(ctx, userID, req.Date)
+	if len(st.Events) == 0 && len(st.ChannelNudges) == 0 {
 		return &tg.UpdatesDifferenceEmpty{Date: st.State.Date, Seq: st.State.Seq}, nil
 	}
 	st.Events = r.enrichUpdateEvents(ctx, userID, st.Events)
 	return tgUpdatesDifference(st), nil
+}
+
+func (r *Router) accountChannelDifferenceNudges(ctx context.Context, userID int64, sinceDate int) []domain.ChannelDifferenceNudge {
+	if r.deps.Channels == nil || userID == 0 || sinceDate <= 0 {
+		return nil
+	}
+	dirty, err := r.deps.Channels.DirtyActiveChannelsForUser(ctx, userID, sinceDate, 0, domain.MaxChannelDifferenceLimit)
+	if err != nil || len(dirty) == 0 {
+		return nil
+	}
+	out := make([]domain.ChannelDifferenceNudge, 0, len(dirty))
+	for _, item := range dirty {
+		if item.ChannelID == 0 {
+			continue
+		}
+		out = append(out, domain.ChannelDifferenceNudge{ChannelID: item.ChannelID, Pts: item.Pts})
+	}
+	return out
 }
 
 func (r *Router) markSessionReceivesUpdates(ctx context.Context, userID int64) {

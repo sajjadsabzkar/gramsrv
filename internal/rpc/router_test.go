@@ -829,12 +829,15 @@ func TestMessagesCreateChatCreatesMegagroupAndDialogsRPC(t *testing.T) {
 	if !ok || !channel.Megagroup || channel.Broadcast {
 		t.Fatalf("chat = %#v, want megagroup channel", updates.Chats[0])
 	}
-	if len(updates.Updates) != 2 {
-		t.Fatalf("updates len = %d, want create + invite service messages", len(updates.Updates))
+	if len(updates.Updates) != 4 {
+		t.Fatalf("updates len = %d, want create/invite service messages plus channel refreshes", len(updates.Updates))
 	}
 	newMsg, ok := updates.Updates[0].(*tg.UpdateNewChannelMessage)
 	if !ok || newMsg.Pts != 1 || newMsg.PtsCount != 1 {
 		t.Fatalf("create update = %#v, want channel pts=1", updates.Updates[0])
+	}
+	if refresh, ok := updates.Updates[1].(*tg.UpdateChannel); !ok || refresh.ChannelID != channel.ID {
+		t.Fatalf("create refresh = %#v, want channel refresh", updates.Updates[1])
 	}
 	service, ok := newMsg.Message.(*tg.MessageService)
 	if !ok {
@@ -843,9 +846,12 @@ func TestMessagesCreateChatCreatesMegagroupAndDialogsRPC(t *testing.T) {
 	if _, ok := service.Action.(*tg.MessageActionChannelCreate); !ok {
 		t.Fatalf("service action = %T, want channel create", service.Action)
 	}
-	inviteMsg, ok := updates.Updates[1].(*tg.UpdateNewChannelMessage)
+	inviteMsg, ok := updates.Updates[2].(*tg.UpdateNewChannelMessage)
 	if !ok || inviteMsg.Pts != 2 || inviteMsg.PtsCount != 1 {
-		t.Fatalf("invite update = %#v, want channel pts=2", updates.Updates[1])
+		t.Fatalf("invite update = %#v, want channel pts=2", updates.Updates[2])
+	}
+	if refresh, ok := updates.Updates[3].(*tg.UpdateChannel); !ok || refresh.ChannelID != channel.ID {
+		t.Fatalf("invite refresh = %#v, want channel refresh", updates.Updates[3])
 	}
 	inviteService, ok := inviteMsg.Message.(*tg.MessageService)
 	if !ok {
@@ -1102,8 +1108,8 @@ func TestMessagesCreateChatDispatchRemembersTDesktopClientInfo(t *testing.T) {
 	if !ok || !channel.Megagroup || !channel.Creator {
 		t.Fatalf("second chat = %#v, want creator megagroup channel", updates.Chats[1])
 	}
-	if len(updates.Updates) != 2 {
-		t.Fatalf("updates len = %d, want create + invite service messages", len(updates.Updates))
+	if len(updates.Updates) != 4 {
+		t.Fatalf("updates len = %d, want create/invite service messages plus channel refreshes", len(updates.Updates))
 	}
 	participants, err := r.onChannelsGetParticipants(WithUserID(ctx, owner.ID), &tg.ChannelsGetParticipantsRequest{
 		Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
@@ -4337,8 +4343,12 @@ func TestChannelAdminPinInviteRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import invite: %v", err)
 	}
-	if updates := imported.(*tg.Updates); len(updates.Chats) != 1 || len(updates.Updates) != 1 {
-		t.Fatalf("import updates = %+v, want chat and join service update", updates)
+	if updates := imported.(*tg.Updates); len(updates.Chats) != 1 || len(updates.Updates) != 2 {
+		t.Fatalf("import updates = %+v, want chat, join service update, and channel refresh", updates)
+	} else if _, ok := updates.Updates[0].(*tg.UpdateNewChannelMessage); !ok {
+		t.Fatalf("import first update = %T, want join service update", updates.Updates[0])
+	} else if refresh, ok := updates.Updates[1].(*tg.UpdateChannel); !ok || refresh.ChannelID != channel.ID {
+		t.Fatalf("import second update = %#v, want channel refresh", updates.Updates[1])
 	}
 	inviteList, err := r.onMessagesGetExportedChatInvites(WithUserID(ctx, friend.ID), &tg.MessagesGetExportedChatInvitesRequest{
 		Peer:    &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
@@ -7202,6 +7212,29 @@ func TestUpdatesDifferenceIncludesDeleteMessages(t *testing.T) {
 	}
 }
 
+func TestUpdatesDifferenceIncludesChannelTooLongNudge(t *testing.T) {
+	got, ok := tgUpdatesDifference(domain.UpdateDifference{
+		State: domain.UpdateState{Pts: 8, Date: 1700000250, Seq: 0},
+		ChannelNudges: []domain.ChannelDifferenceNudge{{
+			ChannelID: 2000000001,
+			Pts:       12,
+		}},
+	}).(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("difference = %T, want *tg.UpdatesDifference", got)
+	}
+	if got.State.Pts != 8 || len(got.OtherUpdates) != 1 {
+		t.Fatalf("difference = %+v, want one channel nudge and account pts unchanged", got)
+	}
+	update, ok := got.OtherUpdates[0].(*tg.UpdateChannelTooLong)
+	if !ok || update.ChannelID != 2000000001 {
+		t.Fatalf("update = %T %+v, want UpdateChannelTooLong", got.OtherUpdates[0], got.OtherUpdates[0])
+	}
+	if pts, ok := update.GetPts(); !ok || pts != 12 {
+		t.Fatalf("channel nudge pts = %d set=%v, want 12", pts, ok)
+	}
+}
+
 func TestUpdatesDifferenceIncludesSettingsUpdates(t *testing.T) {
 	peer := domain.Peer{Type: domain.PeerTypeUser, ID: 1000000002}
 	got, ok := tgUpdatesDifference(domain.UpdateDifference{
@@ -8351,6 +8384,137 @@ func TestMessagesSendMessageReturnsUpdateAndRecordsOwnerContext(t *testing.T) {
 	}
 	if metrics.messageSend != 1 || metrics.messageSendErr != nil {
 		t.Fatalf("metrics send=%d err=%v, want one successful send", metrics.messageSend, metrics.messageSendErr)
+	}
+}
+
+func TestContactsBlockGetBlockedAndUnblockRPC(t *testing.T) {
+	ctx := context.Background()
+	userStore := memory.NewUserStore()
+	alice, err := userStore.Create(ctx, domain.User{AccessHash: 11, Phone: "15550009001", FirstName: "Alice"})
+	if err != nil {
+		t.Fatalf("create alice: %v", err)
+	}
+	bob, err := userStore.Create(ctx, domain.User{AccessHash: 22, Phone: "15550009002", FirstName: "Bob"})
+	if err != nil {
+		t.Fatalf("create bob: %v", err)
+	}
+	r := New(Config{}, Deps{
+		Users:    appusers.NewService(userStore),
+		Contacts: appcontacts.NewService(memory.NewContactStore(), userStore),
+	}, zaptest.NewLogger(t), clock.System)
+
+	ok, err := r.onContactsBlock(WithUserID(ctx, bob.ID), &tg.ContactsBlockRequest{
+		ID: &tg.InputPeerUser{UserID: alice.ID, AccessHash: alice.AccessHash},
+	})
+	if err != nil || !ok {
+		t.Fatalf("contacts.block = %v, %v", ok, err)
+	}
+	blocked, err := r.onContactsGetBlocked(WithUserID(ctx, bob.ID), &tg.ContactsGetBlockedRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("contacts.getBlocked: %v", err)
+	}
+	full, ok := blocked.(*tg.ContactsBlocked)
+	if !ok || len(full.Blocked) != 1 || len(full.Users) != 1 {
+		t.Fatalf("blocked = %T %+v, want one blocked user", blocked, blocked)
+	}
+	if peer, ok := full.Blocked[0].PeerID.(*tg.PeerUser); !ok || peer.UserID != alice.ID {
+		t.Fatalf("blocked peer = %#v, want alice", full.Blocked[0].PeerID)
+	}
+	if user, ok := full.Users[0].(*tg.User); !ok || user.ID != alice.ID {
+		t.Fatalf("blocked user = %#v, want alice", full.Users[0])
+	}
+
+	ok, err = r.onContactsUnblock(WithUserID(ctx, bob.ID), &tg.ContactsUnblockRequest{
+		ID: &tg.InputPeerUser{UserID: alice.ID, AccessHash: alice.AccessHash},
+	})
+	if err != nil || !ok {
+		t.Fatalf("contacts.unblock = %v, %v", ok, err)
+	}
+	blocked, err = r.onContactsGetBlocked(WithUserID(ctx, bob.ID), &tg.ContactsGetBlockedRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("contacts.getBlocked after unblock: %v", err)
+	}
+	if full, ok := blocked.(*tg.ContactsBlocked); !ok || len(full.Blocked) != 0 {
+		t.Fatalf("blocked after unblock = %T %+v, want empty contacts.blocked", blocked, blocked)
+	}
+}
+
+func TestMessagesPrivateBlockPreventsRecipientInboxAndRevokeRPC(t *testing.T) {
+	ctx := context.Background()
+	userStore := memory.NewUserStore()
+	alice, err := userStore.Create(ctx, domain.User{AccessHash: 11, Phone: "15550009101", FirstName: "Alice"})
+	if err != nil {
+		t.Fatalf("create alice: %v", err)
+	}
+	bob, err := userStore.Create(ctx, domain.User{AccessHash: 22, Phone: "15550009102", FirstName: "Bob"})
+	if err != nil {
+		t.Fatalf("create bob: %v", err)
+	}
+	dialogs := memory.NewDialogStore()
+	messageStore := memory.NewMessageStore(dialogs)
+	contactStore := memory.NewContactStore()
+	r := New(Config{}, Deps{
+		Users:    appusers.NewService(userStore),
+		Contacts: appcontacts.NewService(contactStore, userStore),
+		Messages: appmessages.NewService(messageStore, dialogs),
+		Dialogs:  appdialogs.NewService(dialogs),
+	}, zaptest.NewLogger(t), clock.System)
+
+	delivered, err := r.onMessagesSendMessage(WithUserID(ctx, alice.ID), &tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerUser{UserID: bob.ID, AccessHash: bob.AccessHash},
+		Message:  "before block",
+		RandomID: 91001,
+	})
+	if err != nil {
+		t.Fatalf("send before block: %v", err)
+	}
+	deliveredUpdates := delivered.(*tg.Updates)
+	deliveredMsg := deliveredUpdates.Updates[1].(*tg.UpdateNewMessage).Message.(*tg.Message)
+
+	if ok, err := r.onContactsBlock(WithUserID(ctx, bob.ID), &tg.ContactsBlockRequest{
+		ID: &tg.InputPeerUser{UserID: alice.ID, AccessHash: alice.AccessHash},
+	}); err != nil || !ok {
+		t.Fatalf("bob block alice = %v, %v", ok, err)
+	}
+	blockedSend, err := r.onMessagesSendMessage(WithUserID(ctx, alice.ID), &tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerUser{UserID: bob.ID, AccessHash: bob.AccessHash},
+		Message:  "after block",
+		RandomID: 91002,
+	})
+	if err != nil {
+		t.Fatalf("send after block: %v", err)
+	}
+	blockedUpdates := blockedSend.(*tg.Updates)
+	blockedMsg := blockedUpdates.Updates[1].(*tg.UpdateNewMessage).Message.(*tg.Message)
+	if blockedMsg.ID == 0 || !blockedMsg.Out {
+		t.Fatalf("blocked sender update = %#v, want outgoing sender message", blockedMsg)
+	}
+	bobHistory, err := messageStore.ListByUser(ctx, bob.ID, domain.MessageFilter{
+		HasPeer: true,
+		Peer:    domain.Peer{Type: domain.PeerTypeUser, ID: alice.ID},
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("bob history: %v", err)
+	}
+	if len(bobHistory.Messages) != 1 || bobHistory.Messages[0].Body != "before block" {
+		t.Fatalf("bob history = %+v, want only pre-block delivered message", bobHistory.Messages)
+	}
+	aliceHistory, err := messageStore.ListByUser(ctx, alice.ID, domain.MessageFilter{
+		HasPeer: true,
+		Peer:    domain.Peer{Type: domain.PeerTypeUser, ID: bob.ID},
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("alice history: %v", err)
+	}
+	if len(aliceHistory.Messages) != 2 {
+		t.Fatalf("alice history len = %d, want delivered + sender-only blocked message", len(aliceHistory.Messages))
+	}
+	deleteReq := &tg.MessagesDeleteMessagesRequest{ID: []int{deliveredMsg.ID}}
+	deleteReq.SetRevoke(true)
+	if _, err := r.onMessagesDeleteMessages(WithUserID(ctx, alice.ID), deleteReq); err == nil || !strings.Contains(err.Error(), "DELETE_MESSAGES_FORBIDDEN") {
+		t.Fatalf("revoke after block err = %v, want DELETE_MESSAGES_FORBIDDEN", err)
 	}
 }
 

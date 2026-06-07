@@ -175,7 +175,8 @@ func (s *MessageStore) SendPrivateText(ctx context.Context, req domain.SendPriva
 
 	var recipientBoxID, recipientPts int
 	selfMessage := req.RecipientUserID == req.SenderUserID
-	if !selfMessage {
+	deliverRecipient := !selfMessage && !req.RecipientBlocked
+	if deliverRecipient {
 		recipientBoxID, err = s.boxIDs.NextBoxID(ctx, req.RecipientUserID)
 		if err != nil {
 			s.recordPtsGaps(ctx, reserved, req.Date)
@@ -249,6 +250,8 @@ func (s *MessageStore) SendPrivateText(ctx context.Context, req domain.SendPriva
 		EntitiesJson:     entities,
 		Pts:              int32(senderPts),
 		MediaJson:        mediaJSON,
+		MediaUnread:      false,
+		ReactionUnread:   false,
 	}
 	applyCreateMessageBoxMetadata(&senderArg, senderMeta)
 	senderRow, err := qtx.CreateMessageBox(ctx, senderArg)
@@ -278,8 +281,11 @@ func (s *MessageStore) SendPrivateText(ctx context.Context, req domain.SendPriva
 		return domain.SendPrivateTextResult{}, fmt.Errorf("enqueue sender dispatch: %w", err)
 	}
 
-	recipient := sender
-	if !selfMessage {
+	recipient := domain.Message{}
+	if selfMessage {
+		recipient = sender
+	}
+	if deliverRecipient {
 		recipientArg := sqlcgen.CreateMessageBoxParams{
 			OwnerUserID:      req.RecipientUserID,
 			BoxID:            int32(recipientBoxID),
@@ -294,6 +300,8 @@ func (s *MessageStore) SendPrivateText(ctx context.Context, req domain.SendPriva
 			EntitiesJson:     entities,
 			Pts:              int32(recipientPts),
 			MediaJson:        mediaJSON,
+			MediaUnread:      !req.Media.IsZero(),
+			ReactionUnread:   false,
 		}
 		applyCreateMessageBoxMetadata(&recipientArg, recipientMeta)
 		recipientRow, err := qtx.CreateMessageBox(ctx, recipientArg)
@@ -352,13 +360,23 @@ func (s *MessageStore) duplicateSendResult(ctx context.Context, senderUserID, re
 		return domain.SendPrivateTextResult{}, fmt.Errorf("get duplicate sender box: %w", err)
 	}
 	sender := messageFromGetBoxRow(senderRow)
-	recipient := sender
+	recipient := domain.Message{}
+	if recipientUserID == senderUserID {
+		recipient = sender
+	}
 	if recipientUserID != senderUserID {
 		recipientRow, err := s.q.GetMessageBoxByPrivateMessage(ctx, sqlcgen.GetMessageBoxByPrivateMessageParams{
 			OwnerUserID:      recipientUserID,
 			PrivateMessageID: pm.ID,
 		})
 		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.SendPrivateTextResult{
+					SenderMessage:  sender,
+					SenderEvent:    eventFromMessage(sender),
+					RecipientEvent: domain.UpdateEvent{},
+				}, nil
+			}
 			return domain.SendPrivateTextResult{}, fmt.Errorf("get duplicate recipient box: %w", err)
 		}
 		recipient = messageFromGetBoxRow(recipientRow)
@@ -514,19 +532,20 @@ func (s *MessageStore) ForwardPrivateMessages(ctx context.Context, req domain.Fo
 			}
 		}
 		sent, err := s.SendPrivateText(ctx, domain.SendPrivateTextRequest{
-			SenderUserID:    req.OwnerUserID,
-			RecipientUserID: req.ToUserID,
-			RandomID:        req.RandomIDs[i],
-			Message:         source.Body,
-			Entities:        append([]domain.MessageEntity(nil), source.Entities...),
-			Media:           source.Media,
-			Silent:          req.Silent,
-			NoForwards:      req.NoForwards,
-			ReplyTo:         req.ReplyTo,
-			Forward:         forward,
-			Date:            req.Date,
-			OriginAuthKeyID: req.OriginAuthKeyID,
-			OriginSessionID: req.OriginSessionID,
+			SenderUserID:     req.OwnerUserID,
+			RecipientUserID:  req.ToUserID,
+			RandomID:         req.RandomIDs[i],
+			Message:          source.Body,
+			Entities:         append([]domain.MessageEntity(nil), source.Entities...),
+			Media:            source.Media,
+			Silent:           req.Silent,
+			NoForwards:       req.NoForwards,
+			ReplyTo:          req.ReplyTo,
+			Forward:          forward,
+			Date:             req.Date,
+			OriginAuthKeyID:  req.OriginAuthKeyID,
+			OriginSessionID:  req.OriginSessionID,
+			RecipientBlocked: req.RecipientBlocked,
 		})
 		if err != nil {
 			return res, err
@@ -640,22 +659,24 @@ func (s *MessageStore) ListByUser(ctx context.Context, userID int64, filter doma
 			return domain.MessageList{}, fmt.Errorf("decode message media: %w", err)
 		}
 		out.Messages = append(out.Messages, domain.Message{
-			ID:          int(row.BoxID),
-			UID:         row.PrivateMessageID,
-			OwnerUserID: row.OwnerUserID,
-			Peer:        domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
-			From:        domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
-			Date:        int(row.MessageDate),
-			EditDate:    int(row.EditDate),
-			Out:         row.Outgoing,
-			Silent:      silent,
-			NoForwards:  noforwards,
-			Body:        row.Body,
-			Entities:    entities,
-			ReplyTo:     reply,
-			Forward:     forward,
-			Pts:         int(row.Pts),
-			Media:       media,
+			ID:             int(row.BoxID),
+			UID:            row.PrivateMessageID,
+			OwnerUserID:    row.OwnerUserID,
+			Peer:           domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
+			From:           domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
+			Date:           int(row.MessageDate),
+			EditDate:       int(row.EditDate),
+			Out:            row.Outgoing,
+			Silent:         silent,
+			NoForwards:     noforwards,
+			Body:           row.Body,
+			Entities:       entities,
+			ReplyTo:        reply,
+			Forward:        forward,
+			Pts:            int(row.Pts),
+			Media:          media,
+			MediaUnread:    row.MediaUnread,
+			ReactionUnread: row.ReactionUnread,
 		})
 		if out.Count == 0 {
 			out.Count = int(row.TotalCount)
@@ -832,6 +853,9 @@ func (s *MessageStore) ReadMessageContents(ctx context.Context, req domain.ReadM
 	if req.OwnerUserID == 0 {
 		return res, fmt.Errorf("read message contents: missing owner user id")
 	}
+	if req.Date == 0 {
+		req.Date = int(time.Now().Unix())
+	}
 	if len(req.IDs) > domain.MaxGetMessageIDs {
 		return res, domain.ErrMessageIDInvalid
 	}
@@ -850,27 +874,128 @@ func (s *MessageStore) ReadMessageContents(ctx context.Context, req domain.ReadM
 	if len(ids) == 0 {
 		return res, nil
 	}
-	rows, err := s.db.Query(ctx, `
-SELECT box_id
-FROM message_boxes
-WHERE owner_user_id = $1
-  AND box_id = ANY($2::int[])
-  AND NOT deleted
+	beginner, ok := s.db.(txBeginner)
+	if !ok {
+		return res, fmt.Errorf("read message contents: db does not support transactions")
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return res, fmt.Errorf("begin read message contents tx: %w", err)
+	}
+	qtx := sqlcgen.New(tx)
+	committed := false
+	var reserved []reservedPts
+	defer func() {
+		if committed {
+			return
+		}
+		_ = tx.Rollback(ctx)
+		s.recordPtsGaps(ctx, reserved, req.Date)
+	}()
+	if err := lockUsersForUpdate(ctx, tx, req.OwnerUserID); err != nil {
+		return res, fmt.Errorf("lock read message contents user: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
+WITH target AS (
+  SELECT owner_user_id, box_id, peer_type, peer_id, reaction_unread
+  FROM message_boxes
+  WHERE owner_user_id = $1
+    AND box_id = ANY($2::int[])
+    AND NOT deleted
+    AND (media_unread OR reaction_unread)
+  FOR UPDATE
+),
+updated AS (
+  UPDATE message_boxes
+  SET media_unread = false,
+      reaction_unread = false
+  FROM target t
+  WHERE message_boxes.owner_user_id = t.owner_user_id
+    AND message_boxes.box_id = t.box_id
+  RETURNING message_boxes.box_id, t.peer_type, t.peer_id, t.reaction_unread
+)
+SELECT box_id, peer_type, peer_id, reaction_unread
+FROM updated
 ORDER BY box_id`, req.OwnerUserID, ids)
 	if err != nil {
 		return res, fmt.Errorf("read message contents: %w", err)
 	}
 	defer rows.Close()
+	affectedPeers := make(map[domain.Peer]struct{})
 	for rows.Next() {
 		var id int32
-		if err := rows.Scan(&id); err != nil {
+		var peerType string
+		var peerID int64
+		var reactionUnread bool
+		if err := rows.Scan(&id, &peerType, &peerID, &reactionUnread); err != nil {
 			return res, fmt.Errorf("scan read message contents: %w", err)
 		}
 		res.MessageIDs = append(res.MessageIDs, int(id))
+		if reactionUnread && peerID != 0 {
+			affectedPeers[domain.Peer{Type: domain.PeerType(peerType), ID: peerID}] = struct{}{}
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return res, fmt.Errorf("read message contents rows: %w", err)
 	}
+	if len(res.MessageIDs) == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return res, fmt.Errorf("commit read message contents noop: %w", err)
+		}
+		committed = true
+		return res, nil
+	}
+	for peer := range affectedPeers {
+		if peer.Type != domain.PeerTypeUser || peer.ID == 0 {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+UPDATE dialogs d
+SET unread_reactions_count = (
+    SELECT COUNT(*)::int
+    FROM message_boxes m
+    WHERE m.owner_user_id = d.user_id
+      AND m.peer_type = d.peer_type
+      AND m.peer_id = d.peer_id
+      AND NOT m.deleted
+      AND m.reaction_unread
+),
+updated_at = now()
+WHERE d.user_id = $1
+  AND d.peer_type = $2
+  AND d.peer_id = $3`, req.OwnerUserID, string(peer.Type), peer.ID); err != nil {
+			return res, fmt.Errorf("refresh dialog unread reactions after content read: %w", err)
+		}
+	}
+	pts, err := s.nextPtsN(ctx, req.OwnerUserID, len(res.MessageIDs))
+	if err != nil {
+		return res, fmt.Errorf("allocate read message contents pts: %w", err)
+	}
+	reserved = append(reserved, reservedPts{userID: req.OwnerUserID, pts: pts, count: len(res.MessageIDs)})
+	res.Event = domain.UpdateEvent{
+		UserID:     req.OwnerUserID,
+		Type:       domain.UpdateEventReadMessageContents,
+		Pts:        pts,
+		PtsCount:   len(res.MessageIDs),
+		Date:       req.Date,
+		MessageIDs: append([]int(nil), res.MessageIDs...),
+	}
+	if err := appendUserUpdateEvent(ctx, qtx, req.OwnerUserID, res.Event); err != nil {
+		return res, fmt.Errorf("append read message contents event: %w", err)
+	}
+	if err := qtx.EnqueueDispatch(ctx, sqlcgen.EnqueueDispatchParams{
+		TargetUserID:     req.OwnerUserID,
+		Pts:              int32(pts),
+		EventType:        string(domain.UpdateEventReadMessageContents),
+		ExcludeAuthKeyID: authKeyIDToInt64(req.OriginAuthKeyID),
+		ExcludeSessionID: req.OriginSessionID,
+	}); err != nil {
+		return res, fmt.Errorf("enqueue read message contents dispatch: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return res, fmt.Errorf("commit read message contents tx: %w", err)
+	}
+	committed = true
 	return res, nil
 }
 
@@ -994,6 +1119,39 @@ DO UPDATE SET
 			int32(i+1),
 		); err != nil {
 			return domain.PrivateMessageReactionsResult{}, fmt.Errorf("insert message reaction: %w", err)
+		}
+	}
+	if target.messageSenderID != 0 && target.messageSenderID != req.UserID {
+		if _, err := tx.Exec(ctx, `
+UPDATE message_boxes b
+SET reaction_unread = EXISTS (
+    SELECT 1
+    FROM private_message_reactions r
+    WHERE r.message_sender_id = b.message_sender_id
+      AND r.private_message_id = b.private_message_id
+      AND r.user_id <> b.owner_user_id
+)
+WHERE b.owner_user_id = $1
+  AND b.message_sender_id = $2
+  AND b.private_message_id = $3`, target.messageSenderID, target.messageSenderID, target.privateMessageID); err != nil {
+			return domain.PrivateMessageReactionsResult{}, fmt.Errorf("update private reaction unread: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+UPDATE dialogs d
+SET unread_reactions_count = (
+    SELECT COUNT(*)::int
+    FROM message_boxes m
+    WHERE m.owner_user_id = d.user_id
+      AND m.peer_type = d.peer_type
+      AND m.peer_id = d.peer_id
+      AND NOT m.deleted
+      AND m.reaction_unread
+),
+updated_at = now()
+WHERE d.user_id = $1
+  AND d.peer_type = $2
+  AND d.peer_id = $3`, target.messageSenderID, string(domain.PeerTypeUser), req.UserID); err != nil {
+			return domain.PrivateMessageReactionsResult{}, fmt.Errorf("refresh private reaction unread dialog: %w", err)
 		}
 	}
 
@@ -1911,22 +2069,24 @@ func messageFromBoxRow(row sqlcgen.CreateMessageBoxRow) domain.Message {
 		row.FwdDate,
 	)
 	return domain.Message{
-		Media:       media,
-		ID:          int(row.BoxID),
-		UID:         row.PrivateMessageID,
-		OwnerUserID: row.OwnerUserID,
-		Peer:        domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
-		From:        domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
-		Date:        int(row.MessageDate),
-		EditDate:    int(row.EditDate),
-		Out:         row.Outgoing,
-		Silent:      silent,
-		NoForwards:  noforwards,
-		Body:        row.Body,
-		Entities:    entities,
-		ReplyTo:     reply,
-		Forward:     forward,
-		Pts:         int(row.Pts),
+		Media:          media,
+		ID:             int(row.BoxID),
+		UID:            row.PrivateMessageID,
+		OwnerUserID:    row.OwnerUserID,
+		Peer:           domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
+		From:           domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
+		Date:           int(row.MessageDate),
+		EditDate:       int(row.EditDate),
+		Out:            row.Outgoing,
+		Silent:         silent,
+		NoForwards:     noforwards,
+		Body:           row.Body,
+		Entities:       entities,
+		ReplyTo:        reply,
+		Forward:        forward,
+		Pts:            int(row.Pts),
+		MediaUnread:    row.MediaUnread,
+		ReactionUnread: row.ReactionUnread,
 	}
 }
 
@@ -1949,22 +2109,24 @@ func messageFromGetBoxRow(row sqlcgen.GetMessageBoxByPrivateMessageRow) domain.M
 		row.FwdDate,
 	)
 	return domain.Message{
-		Media:       media,
-		ID:          int(row.BoxID),
-		UID:         row.PrivateMessageID,
-		OwnerUserID: row.OwnerUserID,
-		Peer:        domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
-		From:        domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
-		Date:        int(row.MessageDate),
-		EditDate:    int(row.EditDate),
-		Out:         row.Outgoing,
-		Silent:      silent,
-		NoForwards:  noforwards,
-		Body:        row.Body,
-		Entities:    entities,
-		ReplyTo:     reply,
-		Forward:     forward,
-		Pts:         int(row.Pts),
+		Media:          media,
+		ID:             int(row.BoxID),
+		UID:            row.PrivateMessageID,
+		OwnerUserID:    row.OwnerUserID,
+		Peer:           domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
+		From:           domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
+		Date:           int(row.MessageDate),
+		EditDate:       int(row.EditDate),
+		Out:            row.Outgoing,
+		Silent:         silent,
+		NoForwards:     noforwards,
+		Body:           row.Body,
+		Entities:       entities,
+		ReplyTo:        reply,
+		Forward:        forward,
+		Pts:            int(row.Pts),
+		MediaUnread:    row.MediaUnread,
+		ReactionUnread: row.ReactionUnread,
 	}
 }
 
@@ -1996,22 +2158,24 @@ func messageFromVisibleBoxRow(row sqlcgen.ListVisibleMessageBoxesByPrivateMessag
 		return domain.Message{}, fmt.Errorf("decode visible message media: %w", err)
 	}
 	return domain.Message{
-		Media:       media,
-		ID:          int(row.BoxID),
-		UID:         row.PrivateMessageID,
-		OwnerUserID: row.OwnerUserID,
-		Peer:        domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
-		From:        domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
-		Date:        int(row.MessageDate),
-		EditDate:    int(row.EditDate),
-		Out:         row.Outgoing,
-		Silent:      silent,
-		NoForwards:  noforwards,
-		Body:        row.Body,
-		Entities:    entities,
-		ReplyTo:     reply,
-		Forward:     forward,
-		Pts:         int(row.Pts),
+		Media:          media,
+		ID:             int(row.BoxID),
+		UID:            row.PrivateMessageID,
+		OwnerUserID:    row.OwnerUserID,
+		Peer:           domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
+		From:           domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
+		Date:           int(row.MessageDate),
+		EditDate:       int(row.EditDate),
+		Out:            row.Outgoing,
+		Silent:         silent,
+		NoForwards:     noforwards,
+		Body:           row.Body,
+		Entities:       entities,
+		ReplyTo:        reply,
+		Forward:        forward,
+		Pts:            int(row.Pts),
+		MediaUnread:    row.MediaUnread,
+		ReactionUnread: row.ReactionUnread,
 	}, nil
 }
 
@@ -2043,22 +2207,24 @@ func messageFromUpdateEditRow(row sqlcgen.UpdateMessageBoxEditRow) (domain.Messa
 		return domain.Message{}, fmt.Errorf("decode edited message media: %w", err)
 	}
 	return domain.Message{
-		Media:       media,
-		ID:          int(row.BoxID),
-		UID:         row.PrivateMessageID,
-		OwnerUserID: row.OwnerUserID,
-		Peer:        domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
-		From:        domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
-		Date:        int(row.MessageDate),
-		EditDate:    int(row.EditDate),
-		Out:         row.Outgoing,
-		Silent:      silent,
-		NoForwards:  noforwards,
-		Body:        row.Body,
-		Entities:    entities,
-		ReplyTo:     reply,
-		Forward:     forward,
-		Pts:         int(row.Pts),
+		Media:          media,
+		ID:             int(row.BoxID),
+		UID:            row.PrivateMessageID,
+		OwnerUserID:    row.OwnerUserID,
+		Peer:           domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
+		From:           domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
+		Date:           int(row.MessageDate),
+		EditDate:       int(row.EditDate),
+		Out:            row.Outgoing,
+		Silent:         silent,
+		NoForwards:     noforwards,
+		Body:           row.Body,
+		Entities:       entities,
+		ReplyTo:        reply,
+		Forward:        forward,
+		Pts:            int(row.Pts),
+		MediaUnread:    row.MediaUnread,
+		ReactionUnread: row.ReactionUnread,
 	}, nil
 }
 
@@ -2090,22 +2256,24 @@ func messageFromForwardRow(row sqlcgen.GetMessageBoxesForForwardRow) (domain.Mes
 		return domain.Message{}, fmt.Errorf("decode forward message media: %w", err)
 	}
 	return domain.Message{
-		Media:       media,
-		ID:          int(row.BoxID),
-		UID:         row.PrivateMessageID,
-		OwnerUserID: row.OwnerUserID,
-		Peer:        domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
-		From:        domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
-		Date:        int(row.MessageDate),
-		EditDate:    int(row.EditDate),
-		Out:         row.Outgoing,
-		Silent:      silent,
-		NoForwards:  noforwards,
-		Body:        row.Body,
-		Entities:    entities,
-		ReplyTo:     reply,
-		Forward:     forward,
-		Pts:         int(row.Pts),
+		Media:          media,
+		ID:             int(row.BoxID),
+		UID:            row.PrivateMessageID,
+		OwnerUserID:    row.OwnerUserID,
+		Peer:           domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
+		From:           domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
+		Date:           int(row.MessageDate),
+		EditDate:       int(row.EditDate),
+		Out:            row.Outgoing,
+		Silent:         silent,
+		NoForwards:     noforwards,
+		Body:           row.Body,
+		Entities:       entities,
+		ReplyTo:        reply,
+		Forward:        forward,
+		Pts:            int(row.Pts),
+		MediaUnread:    row.MediaUnread,
+		ReactionUnread: row.ReactionUnread,
 	}, nil
 }
 
@@ -2137,22 +2305,24 @@ func messageFromIDRow(row sqlcgen.GetMessageBoxesByIDsRow) (domain.Message, erro
 		return domain.Message{}, fmt.Errorf("decode message media: %w", err)
 	}
 	return domain.Message{
-		Media:       media,
-		ID:          int(row.BoxID),
-		UID:         row.PrivateMessageID,
-		OwnerUserID: row.OwnerUserID,
-		Peer:        domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
-		From:        domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
-		Date:        int(row.MessageDate),
-		EditDate:    int(row.EditDate),
-		Out:         row.Outgoing,
-		Silent:      silent,
-		NoForwards:  noforwards,
-		Body:        row.Body,
-		Entities:    entities,
-		ReplyTo:     reply,
-		Forward:     forward,
-		Pts:         int(row.Pts),
+		Media:          media,
+		ID:             int(row.BoxID),
+		UID:            row.PrivateMessageID,
+		OwnerUserID:    row.OwnerUserID,
+		Peer:           domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
+		From:           domain.Peer{Type: domain.PeerTypeUser, ID: row.FromUserID},
+		Date:           int(row.MessageDate),
+		EditDate:       int(row.EditDate),
+		Out:            row.Outgoing,
+		Silent:         silent,
+		NoForwards:     noforwards,
+		Body:           row.Body,
+		Entities:       entities,
+		ReplyTo:        reply,
+		Forward:        forward,
+		Pts:            int(row.Pts),
+		MediaUnread:    row.MediaUnread,
+		ReactionUnread: row.ReactionUnread,
 	}, nil
 }
 

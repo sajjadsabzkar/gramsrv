@@ -94,21 +94,26 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 	if err != nil {
 		return nil, false, err
 	}
+	recipientBlocked, err := r.peerBlocksUser(ctx, userID, peer.ID)
+	if err != nil {
+		return nil, false, err
+	}
 	sessionID, _ := SessionIDFrom(ctx)
 	authKeyID, _ := AuthKeyIDFrom(ctx)
 	res, err := r.deps.Messages.SendPrivateText(ctx, userID, domain.SendPrivateTextRequest{
-		SenderUserID:    userID,
-		RecipientUserID: peer.ID,
-		RandomID:        p.randomID,
-		Message:         p.message,
-		Entities:        domainMessageEntities(p.entities),
-		Media:           p.media,
-		Silent:          p.silent,
-		NoForwards:      p.noforwards,
-		ReplyTo:         replyTo,
-		Date:            int(r.clock.Now().Unix()),
-		OriginAuthKeyID: authKeyID,
-		OriginSessionID: sessionID,
+		SenderUserID:     userID,
+		RecipientUserID:  peer.ID,
+		RandomID:         p.randomID,
+		Message:          p.message,
+		Entities:         domainMessageEntities(p.entities),
+		Media:            p.media,
+		Silent:           p.silent,
+		NoForwards:       p.noforwards,
+		ReplyTo:          replyTo,
+		Date:             int(r.clock.Now().Unix()),
+		OriginAuthKeyID:  authKeyID,
+		OriginSessionID:  sessionID,
+		RecipientBlocked: recipientBlocked,
 	})
 	if err != nil {
 		return nil, false, messageSendErr(err)

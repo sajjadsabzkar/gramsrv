@@ -140,6 +140,10 @@ func messageAuthorRequiredErr() error { return tgerr.New(403, "MESSAGE_AUTHOR_RE
 
 func messageNotModifiedErr() error { return tgerr.New(400, "MESSAGE_NOT_MODIFIED") }
 
+func messageEditForbiddenErr() error { return tgerr.New(403, "EDIT_MESSAGES_FORBIDDEN") }
+
+func messageDeleteForbiddenErr() error { return tgerr.New(403, "DELETE_MESSAGES_FORBIDDEN") }
+
 func messageNotReadYetErr() error { return tgerr.New(400, "MESSAGE_NOT_READ_YET") }
 
 func replyMessageIDInvalidErr() error { return tgerr.New(400, "REPLY_MESSAGE_ID_INVALID") }

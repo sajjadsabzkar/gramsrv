@@ -31,6 +31,8 @@ func (r *Router) registerContacts(d *tg.ServerDispatcher) {
 	d.OnContactsImportContacts(r.onContactsImportContacts)
 	d.OnContactsAddContact(r.onContactsAddContact)
 	d.OnContactsDeleteContacts(r.onContactsDeleteContacts)
+	d.OnContactsBlock(r.onContactsBlock)
+	d.OnContactsUnblock(r.onContactsUnblock)
 	d.OnContactsUpdateContactNote(r.onContactsUpdateContactNote)
 	d.OnContactsSearch(r.onContactsSearch)
 	d.OnContactsResolveUsername(r.onContactsResolveUsername)
@@ -38,18 +40,88 @@ func (r *Router) registerContacts(d *tg.ServerDispatcher) {
 	d.OnContactsGetTopPeers(func(ctx context.Context, req *tg.ContactsGetTopPeersRequest) (tg.ContactsTopPeersClass, error) {
 		return tdesktop.TopPeers(), nil
 	})
-	d.OnContactsGetBlocked(func(ctx context.Context, req *tg.ContactsGetBlockedRequest) (tg.ContactsBlockedClass, error) {
-		if req.Limit > 50 {
-			return nil, limitInvalidErr()
-		}
-		return tdesktop.BlockedContacts(), nil
-	})
+	d.OnContactsGetBlocked(r.onContactsGetBlocked)
 	d.OnContactsGetSponsoredPeers(func(ctx context.Context, q string) (tg.ContactsSponsoredPeersClass, error) {
 		if utf8.RuneCountInString(q) > maxContactSearchQLen {
 			return nil, limitInvalidErr()
 		}
 		return &tg.ContactsSponsoredPeersEmpty{}, nil
 	})
+}
+
+func (r *Router) onContactsBlock(ctx context.Context, req *tg.ContactsBlockRequest) (bool, error) {
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return false, internalErr()
+	}
+	peer, ok := r.domainPeerFromInputPeer(userID, req.ID)
+	if !ok || peer.Type != domain.PeerTypeUser || peer.ID == 0 || peer.ID == userID {
+		return false, userIDInvalidErr()
+	}
+	if r.deps.Contacts == nil {
+		return true, nil
+	}
+	if _, err := r.deps.Contacts.BlockContact(ctx, userID, peer.ID, int(r.clock.Now().Unix())); err != nil {
+		return false, contactErr(err)
+	}
+	if settings, err := r.deps.Contacts.GetPeerSettings(ctx, userID, peer); err == nil {
+		_ = r.recordPeerSettings(ctx, userID, peer, settings)
+	}
+	return true, nil
+}
+
+func (r *Router) onContactsUnblock(ctx context.Context, req *tg.ContactsUnblockRequest) (bool, error) {
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return false, internalErr()
+	}
+	peer, ok := r.domainPeerFromInputPeer(userID, req.ID)
+	if !ok || peer.Type != domain.PeerTypeUser || peer.ID == 0 || peer.ID == userID {
+		return false, userIDInvalidErr()
+	}
+	if r.deps.Contacts == nil {
+		return true, nil
+	}
+	if _, err := r.deps.Contacts.UnblockContact(ctx, userID, peer.ID); err != nil {
+		return false, contactErr(err)
+	}
+	if settings, err := r.deps.Contacts.GetPeerSettings(ctx, userID, peer); err == nil {
+		_ = r.recordPeerSettings(ctx, userID, peer, settings)
+	}
+	return true, nil
+}
+
+func (r *Router) onContactsGetBlocked(ctx context.Context, req *tg.ContactsGetBlockedRequest) (tg.ContactsBlockedClass, error) {
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return nil, internalErr()
+	}
+	if req.Limit > 100 || req.Offset < 0 {
+		return nil, limitInvalidErr()
+	}
+	if r.deps.Contacts == nil {
+		return tdesktop.BlockedContacts(), nil
+	}
+	list, err := r.deps.Contacts.GetBlocked(ctx, userID, req.Offset, req.Limit)
+	if err != nil {
+		return nil, internalErr()
+	}
+	blocked := make([]tg.PeerBlocked, 0, len(list.Blocked))
+	users := make([]tg.UserClass, 0, len(list.Blocked))
+	for _, item := range list.Blocked {
+		if item.User.ID == 0 {
+			continue
+		}
+		blocked = append(blocked, tg.PeerBlocked{
+			PeerID: &tg.PeerUser{UserID: item.User.ID},
+			Date:   item.Date,
+		})
+		users = append(users, r.tgUser(item.User))
+	}
+	if list.Count > len(blocked)+req.Offset {
+		return &tg.ContactsBlockedSlice{Count: list.Count, Blocked: blocked, Chats: []tg.ChatClass{}, Users: users}, nil
+	}
+	return &tg.ContactsBlocked{Blocked: blocked, Chats: []tg.ChatClass{}, Users: users}, nil
 }
 
 func (r *Router) onContactsGetContacts(ctx context.Context, hash int64) (tg.ContactsContactsClass, error) {

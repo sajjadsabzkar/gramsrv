@@ -146,6 +146,8 @@ SELECT
   COALESCE(m.fwd_from_name, '')::text AS fwd_from_name,
   COALESCE(m.fwd_date, 0)::int AS fwd_date,
   COALESCE(m.media::text, '{}')::text AS media_json,
+  COALESCE(m.media_unread, false)::boolean AS media_unread,
+  COALESCE(m.reaction_unread, false)::boolean AS reaction_unread,
   COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
   COALESCE(peer_u.access_hash, 0)::bigint AS peer_access_hash,
   COALESCE(peer_u.phone, '')::text AS peer_phone,
@@ -291,6 +293,8 @@ type BatchListDispatchEventsRow struct {
 	FwdFromName                     string
 	FwdDate                         int32
 	MediaJson                       string
+	MediaUnread                     bool
+	ReactionUnread                  bool
 	PeerUserID                      int64
 	PeerAccessHash                  int64
 	PeerPhone                       string
@@ -432,6 +436,8 @@ func (q *Queries) BatchListDispatchEvents(ctx context.Context, arg BatchListDisp
 			&i.FwdFromName,
 			&i.FwdDate,
 			&i.MediaJson,
+			&i.MediaUnread,
+			&i.ReactionUnread,
 			&i.PeerUserID,
 			&i.PeerAccessHash,
 			&i.PeerPhone,
@@ -737,6 +743,8 @@ SELECT
   COALESCE(m.fwd_from_name, '')::text AS fwd_from_name,
   COALESCE(m.fwd_date, 0)::int AS fwd_date,
   COALESCE(m.media::text, '{}')::text AS media_json,
+  COALESCE(m.media_unread, false)::boolean AS media_unread,
+  COALESCE(m.reaction_unread, false)::boolean AS reaction_unread,
   COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
   COALESCE(peer_u.access_hash, 0)::bigint AS peer_access_hash,
   COALESCE(peer_u.phone, '')::text AS peer_phone,
@@ -885,6 +893,8 @@ type ListUserUpdateEventsAfterRow struct {
 	FwdFromName                     string
 	FwdDate                         int32
 	MediaJson                       string
+	MediaUnread                     bool
+	ReactionUnread                  bool
 	PeerUserID                      int64
 	PeerAccessHash                  int64
 	PeerPhone                       string
@@ -1024,6 +1034,8 @@ func (q *Queries) ListUserUpdateEventsAfter(ctx context.Context, arg ListUserUpd
 			&i.FwdFromName,
 			&i.FwdDate,
 			&i.MediaJson,
+			&i.MediaUnread,
+			&i.ReactionUnread,
 			&i.PeerUserID,
 			&i.PeerAccessHash,
 			&i.PeerPhone,

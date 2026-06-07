@@ -20,6 +20,18 @@ type ContactList struct {
 	Hash     int64
 }
 
+// BlockedContact is one owner-visible blocked peer.
+type BlockedContact struct {
+	User User
+	Date int
+}
+
+// BlockedContactList describes contacts.getBlocked output.
+type BlockedContactList struct {
+	Blocked []BlockedContact
+	Count   int
+}
+
 // ContactInput 描述一次 owner 视角联系人写入。
 type ContactInput struct {
 	ContactUserID            int64

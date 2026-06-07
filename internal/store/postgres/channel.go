@@ -6570,6 +6570,9 @@ LIMIT $`+fmt.Sprint(len(args)), args...)
 		if err := rows.Err(); err != nil {
 			return domain.ChannelDifference{}, err
 		}
+		if err := populateChannelMessageUnreadFlags(ctx, s.db, req.UserID, diff.NewMessages); err != nil {
+			return domain.ChannelDifference{}, err
+		}
 		if preview {
 			diff.Dialog = previewChannelDialog(req.UserID, channel, member)
 		} else {
@@ -6634,6 +6637,19 @@ LIMIT $3`, req.ChannelID, req.Pts, limit)
 	} else if lastPts > diff.Pts {
 		diff.Pts = lastPts
 	}
+	if err := populateChannelMessageUnreadFlags(ctx, s.db, req.UserID, diff.NewMessages); err != nil {
+		return domain.ChannelDifference{}, err
+	}
+	for i := range diff.OtherUpdates {
+		if diff.OtherUpdates[i].Message.ID == 0 {
+			continue
+		}
+		messages := []domain.ChannelMessage{diff.OtherUpdates[i].Message}
+		if err := populateChannelMessageUnreadFlags(ctx, s.db, req.UserID, messages); err != nil {
+			return domain.ChannelDifference{}, err
+		}
+		diff.OtherUpdates[i].Message = messages[0]
+	}
 	users, err := listUsersByIDs(ctx, s.db, mapKeysInt64(userRefs))
 	if err != nil {
 		return domain.ChannelDifference{}, err
@@ -6683,6 +6699,45 @@ LIMIT $3`, userID, afterChannelID, limit)
 			return nil, err
 		}
 		out = append(out, channelID)
+	}
+	return out, rows.Err()
+}
+
+func (s *ChannelStore) ListDirtyActiveChannelsForUser(ctx context.Context, userID int64, sinceDate int, afterChannelID int64, limit int) ([]domain.DirtyChannel, error) {
+	if userID == 0 || sinceDate <= 0 || afterChannelID < 0 {
+		return nil, domain.ErrChannelInvalid
+	}
+	if limit <= 0 || limit > domain.MaxChannelDifferenceLimit {
+		limit = domain.MaxChannelDifferenceLimit
+	}
+	rows, err := s.db.Query(ctx, `
+SELECT i.channel_id, c.pts
+FROM user_channel_member_index i
+JOIN channels c ON c.id = i.channel_id AND NOT c.deleted
+WHERE i.user_id = $1
+  AND i.status = 'active'
+  AND NOT i.deleted
+  AND i.channel_id > $3
+  AND EXISTS (
+      SELECT 1
+      FROM channel_update_events e
+      WHERE e.channel_id = i.channel_id
+        AND e.date > $2
+      LIMIT 1
+  )
+ORDER BY i.channel_id ASC
+LIMIT $4`, userID, sinceDate, afterChannelID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list dirty active channels for user: %w", err)
+	}
+	defer rows.Close()
+	out := make([]domain.DirtyChannel, 0, limit)
+	for rows.Next() {
+		var item domain.DirtyChannel
+		if err := rows.Scan(&item.ChannelID, &item.Pts); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
 	}
 	return out, rows.Err()
 }
@@ -7119,6 +7174,9 @@ func (s *ChannelStore) populateChannelMessagesReactions(ctx context.Context, db 
 	if len(messages) == 0 {
 		return nil
 	}
+	if err := populateChannelMessageUnreadFlags(ctx, db, viewerUserID, messages); err != nil {
+		return err
+	}
 	channelsByID := make(map[int64]domain.Channel, len(channels))
 	for _, ch := range channels {
 		if ch.ID != 0 {
@@ -7219,6 +7277,54 @@ ORDER BY message_id ASC, reaction_date DESC, reacted_user_id DESC, reaction_valu
 					messages[idx].Reactions = &reactions
 				}
 				messages[idx].Reactions.Recent = append(messages[idx].Reactions.Recent, row)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+	return nil
+}
+
+func populateChannelMessageUnreadFlags(ctx context.Context, db sqlcgen.DBTX, viewerUserID int64, messages []domain.ChannelMessage) error {
+	if viewerUserID == 0 || len(messages) == 0 {
+		return nil
+	}
+	indexes := make(map[channelReactionMessageKey][]int)
+	idsByChannel := make(map[int64][]int32)
+	for i := range messages {
+		if messages[i].ChannelID == 0 || messages[i].ID <= 0 {
+			continue
+		}
+		key := channelReactionMessageKey{channelID: messages[i].ChannelID, messageID: messages[i].ID}
+		if _, ok := indexes[key]; !ok {
+			idsByChannel[messages[i].ChannelID] = append(idsByChannel[messages[i].ChannelID], int32(messages[i].ID))
+		}
+		indexes[key] = append(indexes[key], i)
+	}
+	for channelID, ids := range idsByChannel {
+		rows, err := db.Query(ctx, `
+SELECT message_id, COALESCE(media_unread, false)
+FROM channel_unread_mentions
+WHERE user_id = $1
+  AND channel_id = $2
+  AND message_id = ANY($3::int[])`, viewerUserID, channelID, ids)
+		if err != nil {
+			return fmt.Errorf("load channel message unread flags: %w", err)
+		}
+		for rows.Next() {
+			var messageID int
+			var mediaUnread bool
+			if err := rows.Scan(&messageID, &mediaUnread); err != nil {
+				rows.Close()
+				return err
+			}
+			key := channelReactionMessageKey{channelID: channelID, messageID: messageID}
+			for _, idx := range indexes[key] {
+				messages[idx].Mentioned = true
+				messages[idx].MediaUnread = mediaUnread
 			}
 		}
 		if err := rows.Err(); err != nil {
@@ -8611,6 +8717,7 @@ func insertChannelUnreadMentionsTx(ctx context.Context, tx pgx.Tx, channelID int
 		candidates = candidates[:domain.MaxChannelMentionRecipients]
 	}
 	topID := channelMentionTopID(msg)
+	mediaUnread := !msg.Media.IsZero()
 	if _, err := tx.Exec(ctx, `
 WITH input(user_id) AS (
     SELECT DISTINCT unnest($4::bigint[])
@@ -8626,8 +8733,8 @@ active AS (
     LIMIT $6
 ),
 inserted AS (
-    INSERT INTO channel_unread_mentions (user_id, channel_id, message_id, top_message_id)
-    SELECT user_id, $1, $2, $3
+    INSERT INTO channel_unread_mentions (user_id, channel_id, message_id, top_message_id, media_unread)
+    SELECT user_id, $1, $2, $3, $7
     FROM active
     ON CONFLICT DO NOTHING
     RETURNING user_id
@@ -8641,7 +8748,7 @@ ON CONFLICT (user_id, channel_id) DO UPDATE SET
     top_message_id = GREATEST(channel_dialogs.top_message_id, EXCLUDED.top_message_id),
     top_message_date = GREATEST(channel_dialogs.top_message_date, EXCLUDED.top_message_date),
     unread_mentions_count = channel_dialogs.unread_mentions_count + 1,
-    updated_at = now()`, channelID, msg.ID, topID, candidates, msg.Date, domain.MaxChannelMentionRecipients); err != nil {
+    updated_at = now()`, channelID, msg.ID, topID, candidates, msg.Date, domain.MaxChannelMentionRecipients, mediaUnread); err != nil {
 		return fmt.Errorf("insert channel unread mentions: %w", err)
 	}
 	return nil

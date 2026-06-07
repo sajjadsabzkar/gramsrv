@@ -229,11 +229,57 @@ func (s *Service) GetPeerSettings(ctx context.Context, userID int64, peer domain
 	if err != nil {
 		return domain.PeerSettings{}, err
 	}
+	blocked, err := s.contacts.IsBlocked(ctx, userID, peer.ID)
+	if err != nil {
+		return domain.PeerSettings{}, err
+	}
 	return domain.PeerSettings{
 		AddContact:   !found,
-		BlockContact: !found,
+		BlockContact: !blocked,
 		ShareContact: found,
 	}, nil
+}
+
+// BlockContact adds peer to the current user's blocklist.
+func (s *Service) BlockContact(ctx context.Context, userID, peerUserID int64, date int) (bool, error) {
+	if s == nil || s.contacts == nil || userID == 0 || peerUserID == 0 || peerUserID == userID {
+		return false, ErrContactIDInvalid
+	}
+	if s.users != nil {
+		if _, found, err := s.users.ByID(ctx, peerUserID); err != nil {
+			return false, err
+		} else if !found {
+			return false, ErrContactIDInvalid
+		}
+	}
+	return s.contacts.Block(ctx, userID, peerUserID, date)
+}
+
+// UnblockContact removes peer from the current user's blocklist.
+func (s *Service) UnblockContact(ctx context.Context, userID, peerUserID int64) (bool, error) {
+	if s == nil || s.contacts == nil || userID == 0 || peerUserID == 0 || peerUserID == userID {
+		return false, ErrContactIDInvalid
+	}
+	return s.contacts.Unblock(ctx, userID, peerUserID)
+}
+
+// IsBlocked reports whether owner has blocked peer.
+func (s *Service) IsBlocked(ctx context.Context, userID, peerUserID int64) (bool, error) {
+	if s == nil || s.contacts == nil || userID == 0 || peerUserID == 0 {
+		return false, nil
+	}
+	return s.contacts.IsBlocked(ctx, userID, peerUserID)
+}
+
+// GetBlocked returns a bounded blocked contact page.
+func (s *Service) GetBlocked(ctx context.Context, userID int64, offset, limit int) (domain.BlockedContactList, error) {
+	if s == nil || s.contacts == nil || userID == 0 {
+		return domain.BlockedContactList{}, nil
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	return s.contacts.ListBlocked(ctx, userID, offset, limit)
 }
 
 func (s *Service) ContactIDs(ctx context.Context, userID int64, hash int64) ([]int, bool, error) {

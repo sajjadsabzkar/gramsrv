@@ -173,7 +173,9 @@ INSERT INTO message_boxes (
   fwd_from_name,
   fwd_date,
   pts,
-  media
+  media,
+  media_unread,
+  reaction_unread
 ) VALUES (
   $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
   $12::boolean,
@@ -190,7 +192,9 @@ INSERT INTO message_boxes (
   $23::text,
   $24::int,
   $25::int,
-  $26::jsonb
+  $26::jsonb,
+  $27::boolean,
+  $28::boolean
 )
 RETURNING
   box_id,
@@ -218,7 +222,9 @@ RETURNING
   fwd_from_name,
   fwd_date,
   pts,
-  media::text AS media_json
+  media::text AS media_json,
+  media_unread,
+  reaction_unread
 `
 
 type CreateMessageBoxParams struct {
@@ -248,6 +254,8 @@ type CreateMessageBoxParams struct {
 	FwdDate           int32
 	Pts               int32
 	MediaJson         []byte
+	MediaUnread       bool
+	ReactionUnread    bool
 }
 
 type CreateMessageBoxRow struct {
@@ -277,6 +285,8 @@ type CreateMessageBoxRow struct {
 	FwdDate           int32
 	Pts               int32
 	MediaJson         string
+	MediaUnread       bool
+	ReactionUnread    bool
 }
 
 func (q *Queries) CreateMessageBox(ctx context.Context, arg CreateMessageBoxParams) (CreateMessageBoxRow, error) {
@@ -307,6 +317,8 @@ func (q *Queries) CreateMessageBox(ctx context.Context, arg CreateMessageBoxPara
 		arg.FwdDate,
 		arg.Pts,
 		arg.MediaJson,
+		arg.MediaUnread,
+		arg.ReactionUnread,
 	)
 	var i CreateMessageBoxRow
 	err := row.Scan(
@@ -336,6 +348,8 @@ func (q *Queries) CreateMessageBox(ctx context.Context, arg CreateMessageBoxPara
 		&i.FwdDate,
 		&i.Pts,
 		&i.MediaJson,
+		&i.MediaUnread,
+		&i.ReactionUnread,
 	)
 	return i, err
 }
@@ -845,7 +859,9 @@ SELECT
   fwd_from_name,
   fwd_date,
   pts,
-  media::text AS media_json
+  media::text AS media_json,
+  media_unread,
+  reaction_unread
 FROM message_boxes
 WHERE owner_user_id = $1
   AND private_message_id = $2
@@ -884,6 +900,8 @@ type GetMessageBoxByPrivateMessageRow struct {
 	FwdDate           int32
 	Pts               int32
 	MediaJson         string
+	MediaUnread       bool
+	ReactionUnread    bool
 }
 
 func (q *Queries) GetMessageBoxByPrivateMessage(ctx context.Context, arg GetMessageBoxByPrivateMessageParams) (GetMessageBoxByPrivateMessageRow, error) {
@@ -916,6 +934,8 @@ func (q *Queries) GetMessageBoxByPrivateMessage(ctx context.Context, arg GetMess
 		&i.FwdDate,
 		&i.Pts,
 		&i.MediaJson,
+		&i.MediaUnread,
+		&i.ReactionUnread,
 	)
 	return i, err
 }
@@ -948,7 +968,9 @@ SELECT
   fwd_from_name,
   fwd_date,
   pts,
-  media::text AS media_json
+  media::text AS media_json,
+  media_unread,
+  reaction_unread
 FROM message_boxes
 WHERE owner_user_id = $1::bigint
   AND box_id = $2::int
@@ -994,6 +1016,8 @@ type GetMessageBoxForEditRow struct {
 	FwdDate           int32
 	Pts               int32
 	MediaJson         string
+	MediaUnread       bool
+	ReactionUnread    bool
 }
 
 func (q *Queries) GetMessageBoxForEdit(ctx context.Context, arg GetMessageBoxForEditParams) (GetMessageBoxForEditRow, error) {
@@ -1032,6 +1056,8 @@ func (q *Queries) GetMessageBoxForEdit(ctx context.Context, arg GetMessageBoxFor
 		&i.FwdDate,
 		&i.Pts,
 		&i.MediaJson,
+		&i.MediaUnread,
+		&i.ReactionUnread,
 	)
 	return i, err
 }
@@ -1104,6 +1130,8 @@ SELECT
   m.fwd_date,
   m.pts,
   m.media::text AS media_json,
+  m.media_unread,
+  m.reaction_unread,
   COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
   COALESCE(peer_u.access_hash, 0)::bigint AS peer_access_hash,
   COALESCE(peer_u.phone, '')::text AS peer_phone,
@@ -1167,6 +1195,8 @@ type GetMessageBoxesByIDsRow struct {
 	FwdDate             int32
 	Pts                 int32
 	MediaJson           string
+	MediaUnread         bool
+	ReactionUnread      bool
 	PeerUserID          int64
 	PeerAccessHash      int64
 	PeerPhone           string
@@ -1226,6 +1256,8 @@ func (q *Queries) GetMessageBoxesByIDs(ctx context.Context, arg GetMessageBoxesB
 			&i.FwdDate,
 			&i.Pts,
 			&i.MediaJson,
+			&i.MediaUnread,
+			&i.ReactionUnread,
 			&i.PeerUserID,
 			&i.PeerAccessHash,
 			&i.PeerPhone,
@@ -1292,7 +1324,9 @@ SELECT
   m.fwd_from_name,
   m.fwd_date,
   m.pts,
-  m.media::text AS media_json
+  m.media::text AS media_json,
+  m.media_unread,
+  m.reaction_unread
 FROM requested r
 JOIN message_boxes m
   ON m.owner_user_id = $1::bigint
@@ -1339,6 +1373,8 @@ type GetMessageBoxesForForwardRow struct {
 	FwdDate           int32
 	Pts               int32
 	MediaJson         string
+	MediaUnread       bool
+	ReactionUnread    bool
 }
 
 func (q *Queries) GetMessageBoxesForForward(ctx context.Context, arg GetMessageBoxesForForwardParams) ([]GetMessageBoxesForForwardRow, error) {
@@ -1384,6 +1420,8 @@ func (q *Queries) GetMessageBoxesForForward(ctx context.Context, arg GetMessageB
 			&i.FwdDate,
 			&i.Pts,
 			&i.MediaJson,
+			&i.MediaUnread,
+			&i.ReactionUnread,
 		); err != nil {
 			return nil, err
 		}
@@ -1633,6 +1671,8 @@ base AS NOT MATERIALIZED (
     m.fwd_date,
     m.pts,
     m.media::text AS media_json,
+    m.media_unread,
+    m.reaction_unread,
     COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
     COALESCE(peer_u.access_hash, 0)::bigint AS peer_access_hash,
     COALESCE(peer_u.phone, '')::text AS peer_phone,
@@ -1675,7 +1715,7 @@ total AS (
   WHERE $12::boolean
 ),
 backward AS (
-  SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.edit_date, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.pts, b.media_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_last_seen_at
+  SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.edit_date, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_last_seen_at
   FROM base b
   CROSS JOIN load_params p
   WHERE p.load_type = 'backward'
@@ -1688,9 +1728,9 @@ backward AS (
   LIMIT (SELECT limit_count FROM load_params)
 ),
 around_forward AS (
-  SELECT f.box_id, f.private_message_id, f.owner_user_id, f.peer_type, f.peer_id, f.from_user_id, f.message_date, f.edit_date, f.outgoing, f.body, f.entities_json, f.silent, f.noforwards, f.reply_to_msg_id, f.reply_to_peer_type, f.reply_to_peer_id, f.reply_to_top_id, f.quote_text, f.quote_entities_json, f.quote_offset, f.fwd_from_peer_type, f.fwd_from_peer_id, f.fwd_from_name, f.fwd_date, f.pts, f.media_json, f.peer_user_id, f.peer_access_hash, f.peer_phone, f.peer_first_name, f.peer_last_name, f.peer_username, f.peer_country_code, f.peer_verified, f.peer_support, f.peer_last_seen_at, f.from_user_user_id, f.from_user_access_hash, f.from_user_phone, f.from_user_first_name, f.from_user_last_name, f.from_user_username, f.from_user_country_code, f.from_user_verified, f.from_user_support, f.from_user_last_seen_at
+  SELECT f.box_id, f.private_message_id, f.owner_user_id, f.peer_type, f.peer_id, f.from_user_id, f.message_date, f.edit_date, f.outgoing, f.body, f.entities_json, f.silent, f.noforwards, f.reply_to_msg_id, f.reply_to_peer_type, f.reply_to_peer_id, f.reply_to_top_id, f.quote_text, f.quote_entities_json, f.quote_offset, f.fwd_from_peer_type, f.fwd_from_peer_id, f.fwd_from_name, f.fwd_date, f.pts, f.media_json, f.media_unread, f.reaction_unread, f.peer_user_id, f.peer_access_hash, f.peer_phone, f.peer_first_name, f.peer_last_name, f.peer_username, f.peer_country_code, f.peer_verified, f.peer_support, f.peer_last_seen_at, f.from_user_user_id, f.from_user_access_hash, f.from_user_phone, f.from_user_first_name, f.from_user_last_name, f.from_user_username, f.from_user_country_code, f.from_user_verified, f.from_user_support, f.from_user_last_seen_at
   FROM (
-    SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.edit_date, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.pts, b.media_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_last_seen_at
+    SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.edit_date, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_last_seen_at
     FROM base b
     CROSS JOIN load_params p
     WHERE p.load_type = 'around'
@@ -1703,7 +1743,7 @@ around_forward AS (
   ) f
 ),
 around_backward AS (
-  SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.edit_date, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.pts, b.media_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_last_seen_at
+  SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.edit_date, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_last_seen_at
   FROM base b
   CROSS JOIN load_params p
   WHERE p.load_type = 'around'
@@ -1715,9 +1755,9 @@ around_backward AS (
   LIMIT GREATEST((SELECT limit_count + add_offset FROM load_params), 0)
 ),
 forward AS (
-  SELECT f.box_id, f.private_message_id, f.owner_user_id, f.peer_type, f.peer_id, f.from_user_id, f.message_date, f.edit_date, f.outgoing, f.body, f.entities_json, f.silent, f.noforwards, f.reply_to_msg_id, f.reply_to_peer_type, f.reply_to_peer_id, f.reply_to_top_id, f.quote_text, f.quote_entities_json, f.quote_offset, f.fwd_from_peer_type, f.fwd_from_peer_id, f.fwd_from_name, f.fwd_date, f.pts, f.media_json, f.peer_user_id, f.peer_access_hash, f.peer_phone, f.peer_first_name, f.peer_last_name, f.peer_username, f.peer_country_code, f.peer_verified, f.peer_support, f.peer_last_seen_at, f.from_user_user_id, f.from_user_access_hash, f.from_user_phone, f.from_user_first_name, f.from_user_last_name, f.from_user_username, f.from_user_country_code, f.from_user_verified, f.from_user_support, f.from_user_last_seen_at
+  SELECT f.box_id, f.private_message_id, f.owner_user_id, f.peer_type, f.peer_id, f.from_user_id, f.message_date, f.edit_date, f.outgoing, f.body, f.entities_json, f.silent, f.noforwards, f.reply_to_msg_id, f.reply_to_peer_type, f.reply_to_peer_id, f.reply_to_top_id, f.quote_text, f.quote_entities_json, f.quote_offset, f.fwd_from_peer_type, f.fwd_from_peer_id, f.fwd_from_name, f.fwd_date, f.pts, f.media_json, f.media_unread, f.reaction_unread, f.peer_user_id, f.peer_access_hash, f.peer_phone, f.peer_first_name, f.peer_last_name, f.peer_username, f.peer_country_code, f.peer_verified, f.peer_support, f.peer_last_seen_at, f.from_user_user_id, f.from_user_access_hash, f.from_user_phone, f.from_user_first_name, f.from_user_last_name, f.from_user_username, f.from_user_country_code, f.from_user_verified, f.from_user_support, f.from_user_last_seen_at
   FROM (
-    SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.edit_date, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.pts, b.media_json, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_last_seen_at
+    SELECT b.box_id, b.private_message_id, b.owner_user_id, b.peer_type, b.peer_id, b.from_user_id, b.message_date, b.edit_date, b.outgoing, b.body, b.entities_json, b.silent, b.noforwards, b.reply_to_msg_id, b.reply_to_peer_type, b.reply_to_peer_id, b.reply_to_top_id, b.quote_text, b.quote_entities_json, b.quote_offset, b.fwd_from_peer_type, b.fwd_from_peer_id, b.fwd_from_name, b.fwd_date, b.pts, b.media_json, b.media_unread, b.reaction_unread, b.peer_user_id, b.peer_access_hash, b.peer_phone, b.peer_first_name, b.peer_last_name, b.peer_username, b.peer_country_code, b.peer_verified, b.peer_support, b.peer_last_seen_at, b.from_user_user_id, b.from_user_access_hash, b.from_user_phone, b.from_user_first_name, b.from_user_last_name, b.from_user_username, b.from_user_country_code, b.from_user_verified, b.from_user_support, b.from_user_last_seen_at
     FROM base b
     CROSS JOIN load_params p
     WHERE p.load_type = 'forward'
@@ -1730,13 +1770,13 @@ forward AS (
   ) f
 ),
 paged AS (
-  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, edit_date, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, pts, media_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_last_seen_at FROM backward
+  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, edit_date, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, pts, media_json, media_unread, reaction_unread, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_last_seen_at FROM backward
   UNION ALL
-  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, edit_date, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, pts, media_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_last_seen_at FROM around_forward
+  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, edit_date, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, pts, media_json, media_unread, reaction_unread, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_last_seen_at FROM around_forward
   UNION ALL
-  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, edit_date, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, pts, media_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_last_seen_at FROM around_backward
+  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, edit_date, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, pts, media_json, media_unread, reaction_unread, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_last_seen_at FROM around_backward
   UNION ALL
-  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, edit_date, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, pts, media_json, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_last_seen_at FROM forward
+  SELECT box_id, private_message_id, owner_user_id, peer_type, peer_id, from_user_id, message_date, edit_date, outgoing, body, entities_json, silent, noforwards, reply_to_msg_id, reply_to_peer_type, reply_to_peer_id, reply_to_top_id, quote_text, quote_entities_json, quote_offset, fwd_from_peer_type, fwd_from_peer_id, fwd_from_name, fwd_date, pts, media_json, media_unread, reaction_unread, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_last_seen_at, from_user_user_id, from_user_access_hash, from_user_phone, from_user_first_name, from_user_last_name, from_user_username, from_user_country_code, from_user_verified, from_user_support, from_user_last_seen_at FROM forward
 )
 SELECT
   box_id,
@@ -1765,6 +1805,8 @@ SELECT
   fwd_date,
   pts,
   media_json,
+  media_unread,
+  reaction_unread,
   peer_user_id,
   peer_access_hash,
   peer_phone,
@@ -1833,6 +1875,8 @@ type ListMessagesByUserRow struct {
 	FwdDate             int32
 	Pts                 int32
 	MediaJson           string
+	MediaUnread         bool
+	ReactionUnread      bool
 	PeerUserID          int64
 	PeerAccessHash      int64
 	PeerPhone           string
@@ -1905,6 +1949,8 @@ func (q *Queries) ListMessagesByUser(ctx context.Context, arg ListMessagesByUser
 			&i.FwdDate,
 			&i.Pts,
 			&i.MediaJson,
+			&i.MediaUnread,
+			&i.ReactionUnread,
 			&i.PeerUserID,
 			&i.PeerAccessHash,
 			&i.PeerPhone,
@@ -1965,7 +2011,9 @@ SELECT
   fwd_from_name,
   fwd_date,
   pts,
-  media::text AS media_json
+  media::text AS media_json,
+  media_unread,
+  reaction_unread
 FROM message_boxes
 WHERE message_sender_id = $1::bigint
   AND private_message_id = $2::bigint
@@ -2007,6 +2055,8 @@ type ListVisibleMessageBoxesByPrivateMessageRow struct {
 	FwdDate           int32
 	Pts               int32
 	MediaJson         string
+	MediaUnread       bool
+	ReactionUnread    bool
 }
 
 func (q *Queries) ListVisibleMessageBoxesByPrivateMessage(ctx context.Context, arg ListVisibleMessageBoxesByPrivateMessageParams) ([]ListVisibleMessageBoxesByPrivateMessageRow, error) {
@@ -2046,6 +2096,8 @@ func (q *Queries) ListVisibleMessageBoxesByPrivateMessage(ctx context.Context, a
 			&i.FwdDate,
 			&i.Pts,
 			&i.MediaJson,
+			&i.MediaUnread,
+			&i.ReactionUnread,
 		); err != nil {
 			return nil, err
 		}
@@ -2218,7 +2270,9 @@ RETURNING
   fwd_from_name,
   fwd_date,
   pts,
-  media::text AS media_json
+  media::text AS media_json,
+  media_unread,
+  reaction_unread
 `
 
 type UpdateMessageBoxEditParams struct {
@@ -2258,6 +2312,8 @@ type UpdateMessageBoxEditRow struct {
 	FwdDate           int32
 	Pts               int32
 	MediaJson         string
+	MediaUnread       bool
+	ReactionUnread    bool
 }
 
 func (q *Queries) UpdateMessageBoxEdit(ctx context.Context, arg UpdateMessageBoxEditParams) (UpdateMessageBoxEditRow, error) {
@@ -2298,6 +2354,8 @@ func (q *Queries) UpdateMessageBoxEdit(ctx context.Context, arg UpdateMessageBox
 		&i.FwdDate,
 		&i.Pts,
 		&i.MediaJson,
+		&i.MediaUnread,
+		&i.ReactionUnread,
 	)
 	return i, err
 }

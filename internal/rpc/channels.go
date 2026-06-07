@@ -2700,11 +2700,14 @@ func (r *Router) channelOperationUpdates(ctx context.Context, viewerUserID int64
 	for _, member := range res.Members {
 		users = append(users, member.UserID)
 	}
-	updates := make([]tg.UpdateClass, 0, 1)
+	updates := make([]tg.UpdateClass, 0, 2)
 	if res.Event.Pts != 0 {
 		if update := tgChannelUpdate(viewerUserID, res.Event); update != nil {
 			updates = append(updates, update)
 		}
+	}
+	if res.Channel.ID != 0 {
+		updates = append(updates, &tg.UpdateChannel{ChannelID: res.Channel.ID})
 	}
 	return &tg.Updates{
 		Updates: updates,
