@@ -20,6 +20,20 @@ type AccountPassword struct {
 	UpdatedAt               pgtype.Timestamptz
 }
 
+type AccountReactionSetting struct {
+	UserID               int64
+	MessagesNotifyFrom   string
+	StoriesNotifyFrom    string
+	PollVotesNotifyFrom  string
+	ShowPreviews         bool
+	DefaultReactionType  string
+	DefaultReactionValue string
+	PaidPrivacyKind      string
+	PaidPrivacyPeerType  *string
+	PaidPrivacyPeerID    *int64
+	UpdatedAt            pgtype.Timestamptz
+}
+
 type AppConfig struct {
 	Client     string
 	Hash       int32
@@ -539,6 +553,19 @@ type PrivateMessage struct {
 	Media           []byte
 }
 
+type PrivateMessageReaction struct {
+	MessageSenderID  int64
+	PrivateMessageID int64
+	UserID           int64
+	ReactionType     string
+	ReactionValue    string
+	Big              bool
+	ReactionDate     int32
+	ChosenOrder      int32
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+}
+
 type ProfilePhoto struct {
 	OwnerPeerType string
 	OwnerPeerID   int64
@@ -620,6 +647,16 @@ type User struct {
 	Support     bool
 	About       string
 	LastSeenAt  int64
+}
+
+type UserChannelMemberIndex struct {
+	UserID    int64
+	ChannelID int64
+	Status    string
+	Megagroup bool
+	Broadcast bool
+	Deleted   bool
+	UpdatedAt pgtype.Timestamptz
 }
 
 type UserRecentReaction struct {

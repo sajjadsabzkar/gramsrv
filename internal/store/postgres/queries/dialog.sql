@@ -33,7 +33,8 @@ WITH base AS (
     COALESCE(m.message_date, 0)::int AS message_date,
     COALESCE(m.outgoing, false)::boolean AS message_outgoing,
     COALESCE(m.body, '')::text AS message_body,
-    COALESCE(m.entities::text, '[]')::text AS message_entities_json
+    COALESCE(m.entities::text, '[]')::text AS message_entities_json,
+    COALESCE(m.media::text, '{}')::text AS message_media_json
   FROM dialogs d
   LEFT JOIN users u ON d.peer_type = 'user' AND u.id = d.peer_id
   LEFT JOIN contacts c ON d.peer_type = 'user' AND c.user_id = d.user_id AND c.contact_user_id = d.peer_id
@@ -155,7 +156,8 @@ SELECT
   message_date,
   message_outgoing,
   message_body,
-  message_entities_json
+  message_entities_json,
+  message_media_json
 FROM paged
 ORDER BY
   pinned DESC,
@@ -288,6 +290,7 @@ base AS (
     COALESCE(m.outgoing, false)::boolean AS message_outgoing,
     COALESCE(m.body, '')::text AS message_body,
     COALESCE(m.entities::text, '[]')::text AS message_entities_json,
+    COALESCE(m.media::text, '{}')::text AS message_media_json,
     r.ord
   FROM deduped r
   LEFT JOIN dialogs d
@@ -331,7 +334,8 @@ SELECT
   message_date,
   message_outgoing,
   message_body,
-  message_entities_json
+  message_entities_json,
+  message_media_json
 FROM base
 ORDER BY ord;
 

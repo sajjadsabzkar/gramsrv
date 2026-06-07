@@ -602,6 +602,7 @@ base AS (
     COALESCE(m.outgoing, false)::boolean AS message_outgoing,
     COALESCE(m.body, '')::text AS message_body,
     COALESCE(m.entities::text, '[]')::text AS message_entities_json,
+    COALESCE(m.media::text, '{}')::text AS message_media_json,
     r.ord
   FROM deduped r
   LEFT JOIN dialogs d
@@ -645,7 +646,8 @@ SELECT
   message_date,
   message_outgoing,
   message_body,
-  message_entities_json
+  message_entities_json,
+  message_media_json
 FROM base
 ORDER BY ord
 `
@@ -690,6 +692,7 @@ type ListDialogsByPeersRow struct {
 	MessageOutgoing       bool
 	MessageBody           string
 	MessageEntitiesJson   string
+	MessageMediaJson      string
 }
 
 func (q *Queries) ListDialogsByPeers(ctx context.Context, arg ListDialogsByPeersParams) ([]ListDialogsByPeersRow, error) {
@@ -735,6 +738,7 @@ func (q *Queries) ListDialogsByPeers(ctx context.Context, arg ListDialogsByPeers
 			&i.MessageOutgoing,
 			&i.MessageBody,
 			&i.MessageEntitiesJson,
+			&i.MessageMediaJson,
 		); err != nil {
 			return nil, err
 		}
@@ -781,7 +785,8 @@ WITH base AS (
     COALESCE(m.message_date, 0)::int AS message_date,
     COALESCE(m.outgoing, false)::boolean AS message_outgoing,
     COALESCE(m.body, '')::text AS message_body,
-    COALESCE(m.entities::text, '[]')::text AS message_entities_json
+    COALESCE(m.entities::text, '[]')::text AS message_entities_json,
+    COALESCE(m.media::text, '{}')::text AS message_media_json
   FROM dialogs d
   LEFT JOIN users u ON d.peer_type = 'user' AND u.id = d.peer_id
   LEFT JOIN contacts c ON d.peer_type = 'user' AND c.user_id = d.user_id AND c.contact_user_id = d.peer_id
@@ -834,7 +839,7 @@ WITH base AS (
     AND (NOT $16::boolean OR NOT d.pinned)
 ),
 paged AS (
-  SELECT user_id, peer_type, peer_id, folder_id, top_message_id, top_message_date, read_inbox_max_id, read_outbox_max_id, unread_count, unread_mentions_count, unread_reactions_count, pinned, pinned_order, unread_mark, hidden_peer_settings_bar, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_last_seen_at, peer_contact, peer_mutual, message_id, message_from_user_id, message_date, message_outgoing, message_body, message_entities_json
+  SELECT user_id, peer_type, peer_id, folder_id, top_message_id, top_message_date, read_inbox_max_id, read_outbox_max_id, unread_count, unread_mentions_count, unread_reactions_count, pinned, pinned_order, unread_mark, hidden_peer_settings_bar, peer_user_id, peer_access_hash, peer_phone, peer_first_name, peer_last_name, peer_username, peer_country_code, peer_verified, peer_support, peer_last_seen_at, peer_contact, peer_mutual, message_id, message_from_user_id, message_date, message_outgoing, message_body, message_entities_json, message_media_json
   FROM base
   WHERE (
     ($17::int <= 0 AND $18::int <= 0)
@@ -903,7 +908,8 @@ SELECT
   message_date,
   message_outgoing,
   message_body,
-  message_entities_json
+  message_entities_json,
+  message_media_json
 FROM paged
 ORDER BY
   pinned DESC,
@@ -971,6 +977,7 @@ type ListDialogsByUserRow struct {
 	MessageOutgoing       bool
 	MessageBody           string
 	MessageEntitiesJson   string
+	MessageMediaJson      string
 }
 
 func (q *Queries) ListDialogsByUser(ctx context.Context, arg ListDialogsByUserParams) ([]ListDialogsByUserRow, error) {
@@ -1037,6 +1044,7 @@ func (q *Queries) ListDialogsByUser(ctx context.Context, arg ListDialogsByUserPa
 			&i.MessageOutgoing,
 			&i.MessageBody,
 			&i.MessageEntitiesJson,
+			&i.MessageMediaJson,
 		); err != nil {
 			return nil, err
 		}

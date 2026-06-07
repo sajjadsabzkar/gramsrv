@@ -334,8 +334,8 @@ func TestSeedMediaFromRealExport(t *testing.T) {
 		if want := seedThumbMimeType(thumb.Bytes); blob.MimeType != want {
 			t.Fatalf("sample sticker thumb mime = %q, want %q", blob.MimeType, want)
 		}
-		if hasPathThumb(doc.Thumbs) {
-			t.Fatalf("sample sticker document still exposes path thumb together with raster: %+v", doc.Thumbs)
+		if !hasPathThumb(doc.Thumbs) {
+			t.Fatalf("sample sticker document dropped its PhotoPathSize placeholder: %+v", doc.Thumbs)
 		}
 	}
 }
@@ -397,25 +397,6 @@ func TestSeedThumbMimeType(t *testing.T) {
 	}
 }
 
-func TestSeedPreferRasterDocumentThumbsDropsPathWhenRasterExists(t *testing.T) {
-	sizes := []domain.PhotoSize{
-		{Kind: domain.PhotoSizeKindPath, Type: "j", Bytes: []byte("path")},
-		{Kind: domain.PhotoSizeKindCached, Type: "m", Bytes: []byte("webp")},
-	}
-	got := seedPreferRasterDocumentThumbs(sizes)
-	if hasPathThumb(got) {
-		t.Fatalf("path thumb should be dropped when raster exists: %+v", got)
-	}
-	if !hasCachedThumb(got) {
-		t.Fatalf("cached thumb should be kept: %+v", got)
-	}
-
-	onlyPath := []domain.PhotoSize{{Kind: domain.PhotoSizeKindPath, Type: "j", Bytes: []byte("path")}}
-	if got := seedPreferRasterDocumentThumbs(onlyPath); !hasPathThumb(got) {
-		t.Fatalf("path-only thumbs should be kept: %+v", got)
-	}
-}
-
 func TestDocumentsNeedInlineCachedThumbsDetectsStaleMime(t *testing.T) {
 	ctx := context.Background()
 	media := newFakeMediaStore()
@@ -451,34 +432,6 @@ func TestDocumentsNeedInlineCachedThumbsDetectsStaleMime(t *testing.T) {
 	if stale {
 		t.Fatal("repaired mime should not require repair")
 	}
-}
-
-func TestDocumentsNeedInlineCachedThumbsDetectsPathWithRaster(t *testing.T) {
-	ctx := context.Background()
-	media := newFakeMediaStore()
-	doc := domain.Document{
-		ID: 100,
-		Thumbs: []domain.PhotoSize{
-			{Kind: domain.PhotoSizeKindPath, Type: "j", Bytes: []byte("path")},
-			{Kind: domain.PhotoSizeKindCached, Type: "m", Bytes: []byte("webp")},
-		},
-	}
-	if err := media.PutDocument(ctx, doc); err != nil {
-		t.Fatalf("put doc: %v", err)
-	}
-	svc := NewService(media, nil, 2)
-	stale, err := svc.documentsNeedInlineCachedThumbs(ctx, []int64{doc.ID})
-	if err != nil {
-		t.Fatalf("documentsNeedInlineCachedThumbs: %v", err)
-	}
-	if !stale {
-		t.Fatal("path thumb with raster should require repair")
-	}
-}
-
-func hasCachedThumb(sizes []domain.PhotoSize) bool {
-	_, ok := findCachedThumb(sizes)
-	return ok
 }
 
 func findCachedThumb(sizes []domain.PhotoSize) (domain.PhotoSize, bool) {

@@ -3,10 +3,12 @@ package rpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
+	"go.uber.org/zap"
 
 	"telesrv/internal/domain"
 )
@@ -361,6 +363,7 @@ func (r *Router) resolveInputMedia(ctx context.Context, userID int64, input tg.I
 	case *tg.InputMediaDocument:
 		docIDs, ok := inputDocumentCandidateIDs(in.ID)
 		if !ok {
+			r.log.Warn("sendMedia InputMediaDocument unresolvable id", zap.String("id_type", fmt.Sprintf("%T", in.ID)))
 			return nil, mediaInvalidErr()
 		}
 		var doc domain.Document
@@ -376,6 +379,7 @@ func (r *Router) resolveInputMedia(ctx context.Context, userID int64, input tg.I
 			}
 		}
 		if !found {
+			r.log.Warn("sendMedia references unknown document", zap.Int64s("doc_ids", docIDs), zap.Int64("user_id", userID))
 			return nil, mediaInvalidErr()
 		}
 		return messageMediaFromDocument(doc, in.Spoiler, in.TTLSeconds), nil

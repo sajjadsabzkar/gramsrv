@@ -4438,71 +4438,158 @@ func (s *ChannelStore) ListChannelHistory(ctx context.Context, viewerUserID int6
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	args := []any{filter.ChannelID}
-	where := "channel_id = $1 AND NOT deleted"
+	// 公共过滤条件（不含 offset 锚点的方向条件，供 add_offset 各模式复用）
+	baseArgs := []any{filter.ChannelID}
+	base := "channel_id = $1 AND NOT deleted"
 	if member.AvailableMinID > 0 {
-		args = append(args, member.AvailableMinID)
-		where += fmt.Sprintf(" AND id > $%d", len(args))
+		baseArgs = append(baseArgs, member.AvailableMinID)
+		base += fmt.Sprintf(" AND id > $%d", len(baseArgs))
 	}
 	if filter.Query != "" {
-		args = append(args, filter.Query)
-		where += fmt.Sprintf(" AND body ILIKE '%%' || $%d || '%%'", len(args))
+		baseArgs = append(baseArgs, filter.Query)
+		base += fmt.Sprintf(" AND body ILIKE '%%' || $%d || '%%'", len(baseArgs))
 	}
 	if filter.SenderUserID != 0 {
-		args = append(args, filter.SenderUserID)
-		where += fmt.Sprintf(" AND sender_user_id = $%d", len(args))
+		baseArgs = append(baseArgs, filter.SenderUserID)
+		base += fmt.Sprintf(" AND sender_user_id = $%d", len(baseArgs))
 	}
 	if filter.MinDate > 0 {
-		args = append(args, filter.MinDate)
-		where += fmt.Sprintf(" AND message_date > $%d", len(args))
+		baseArgs = append(baseArgs, filter.MinDate)
+		base += fmt.Sprintf(" AND message_date > $%d", len(baseArgs))
 	}
 	if filter.MaxDate > 0 {
-		args = append(args, filter.MaxDate)
-		where += fmt.Sprintf(" AND message_date < $%d", len(args))
-	}
-	if filter.OffsetID > 0 {
-		args = append(args, filter.OffsetID)
-		where += fmt.Sprintf(" AND id < $%d", len(args))
-	} else if filter.OffsetDate > 0 {
-		args = append(args, filter.OffsetDate)
-		where += fmt.Sprintf(" AND message_date < $%d", len(args))
+		baseArgs = append(baseArgs, filter.MaxDate)
+		base += fmt.Sprintf(" AND message_date < $%d", len(baseArgs))
 	}
 	if filter.MaxID > 0 {
-		args = append(args, filter.MaxID)
-		where += fmt.Sprintf(" AND id <= $%d", len(args))
+		baseArgs = append(baseArgs, filter.MaxID)
+		base += fmt.Sprintf(" AND id <= $%d", len(baseArgs))
 	}
 	if filter.MinID > 0 {
-		args = append(args, filter.MinID)
-		where += fmt.Sprintf(" AND id > $%d", len(args))
+		baseArgs = append(baseArgs, filter.MinID)
+		base += fmt.Sprintf(" AND id > $%d", len(baseArgs))
 	}
-	queryLimit := limit + 1
-	args = append(args, queryLimit)
-	rows, err := s.db.Query(ctx, `
-SELECT `+channelMessageColumns+`
-FROM channel_messages
-WHERE `+where+`
-ORDER BY id DESC
-LIMIT $`+fmt.Sprint(len(args)), args...)
-	if err != nil {
-		return domain.ChannelHistory{}, fmt.Errorf("list channel history: %w", err)
+	scanList := func(sql string, queryArgs []any) ([]domain.ChannelMessage, error) {
+		rows, err := s.db.Query(ctx, sql, queryArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("list channel history: %w", err)
+		}
+		defer rows.Close()
+		var list []domain.ChannelMessage
+		for rows.Next() {
+			msg, scanErr := scanChannelMessage(rows)
+			if scanErr != nil {
+				return nil, scanErr
+			}
+			list = append(list, msg)
+		}
+		return list, rows.Err()
 	}
-	defer rows.Close()
+	// add_offset 决定加载方向（对齐私聊 ListMessagesByUser）：
+	//   >= 0           backward：锚点更旧方向，先跳过 add_offset 条
+	//   < 0 且 +limit>0 around：以锚点为中心，向更新取 -add_offset 条 + 向更旧取 limit+add_offset 条
+	//   否则           forward：仅锚点更新方向（拉未读消息）
+	addOffset := filter.AddOffset
 	out := domain.ChannelHistory{Channel: channel, Self: member}
-	for rows.Next() {
-		msg, err := scanChannelMessage(rows)
+	hasMoreOlder := false
+	// 锚点条件：offset_date 优先按日期、否则按消息 id（对齐私聊/orange）；
+	// 二者皆空时向更新方向退化为空、向更旧方向退化为全部（取最新）。
+	forwardCond := func(args *[]any) string {
+		if filter.OffsetDate > 0 {
+			*args = append(*args, filter.OffsetDate)
+			return fmt.Sprintf("message_date >= $%d", len(*args))
+		}
+		if filter.OffsetID > 0 {
+			*args = append(*args, filter.OffsetID)
+			return fmt.Sprintf("id > $%d", len(*args))
+		}
+		return "false"
+	}
+	aroundOlderCond := func(args *[]any) string {
+		if filter.OffsetDate > 0 {
+			*args = append(*args, filter.OffsetDate)
+			return fmt.Sprintf("message_date < $%d", len(*args))
+		}
+		if filter.OffsetID > 0 {
+			*args = append(*args, filter.OffsetID)
+			return fmt.Sprintf("id <= $%d", len(*args))
+		}
+		return "true"
+	}
+	switch {
+	case addOffset < 0 && addOffset+limit > 0:
+		// around：以锚点为中心，向更新取 -add_offset 条 + 向更旧（含锚点）取 limit+add_offset 条
+		fwdLimit := minInt(-addOffset, limit)
+		bwdLimit := maxInt(limit+addOffset, 0)
+		fwdArgs := append([]any{}, baseArgs...)
+		fwdWhere := forwardCond(&fwdArgs)
+		fwdArgs = append(fwdArgs, fwdLimit)
+		newer, err := scanList(fmt.Sprintf("SELECT "+channelMessageColumns+" FROM channel_messages WHERE %s AND %s ORDER BY id ASC LIMIT $%d", base, fwdWhere, len(fwdArgs)), fwdArgs)
 		if err != nil {
 			return domain.ChannelHistory{}, err
 		}
-		out.Messages = append(out.Messages, msg)
+		bwdArgs := append([]any{}, baseArgs...)
+		bwdWhere := aroundOlderCond(&bwdArgs)
+		bwdArgs = append(bwdArgs, bwdLimit+1)
+		older, err := scanList(fmt.Sprintf("SELECT "+channelMessageColumns+" FROM channel_messages WHERE %s AND %s ORDER BY id DESC LIMIT $%d", base, bwdWhere, len(bwdArgs)), bwdArgs)
+		if err != nil {
+			return domain.ChannelHistory{}, err
+		}
+		if len(older) > bwdLimit {
+			older = older[:bwdLimit]
+			hasMoreOlder = true
+		}
+		for i := len(newer) - 1; i >= 0; i-- {
+			out.Messages = append(out.Messages, newer[i])
+		}
+		out.Messages = append(out.Messages, older...)
+	case addOffset < 0:
+		// forward：仅锚点更新方向（拉未读/更新消息）
+		fwdArgs := append([]any{}, baseArgs...)
+		fwdWhere := forwardCond(&fwdArgs)
+		fwdArgs = append(fwdArgs, limit+1)
+		newer, err := scanList(fmt.Sprintf("SELECT "+channelMessageColumns+" FROM channel_messages WHERE %s AND %s ORDER BY id ASC LIMIT $%d", base, fwdWhere, len(fwdArgs)), fwdArgs)
+		if err != nil {
+			return domain.ChannelHistory{}, err
+		}
+		if len(newer) > limit {
+			newer = newer[:limit]
+		}
+		for i := len(newer) - 1; i >= 0; i-- {
+			out.Messages = append(out.Messages, newer[i])
+		}
+	default:
+		// backward：锚点更旧方向（不含锚点），先跳过 add_offset 条
+		where := base
+		args := append([]any{}, baseArgs...)
+		if filter.OffsetDate > 0 {
+			args = append(args, filter.OffsetDate)
+			where += fmt.Sprintf(" AND message_date < $%d", len(args))
+		} else if filter.OffsetID > 0 {
+			args = append(args, filter.OffsetID)
+			where += fmt.Sprintf(" AND id < $%d", len(args))
+		}
+		args = append(args, limit+1)
+		limIdx := len(args)
+		sql := "SELECT " + channelMessageColumns + " FROM channel_messages WHERE " + where + " ORDER BY id DESC"
+		if addOffset > 0 {
+			args = append(args, addOffset)
+			sql += fmt.Sprintf(" OFFSET $%d", len(args))
+		}
+		sql += fmt.Sprintf(" LIMIT $%d", limIdx)
+		older, err := scanList(sql, args)
+		if err != nil {
+			return domain.ChannelHistory{}, err
+		}
+		if len(older) > limit {
+			older = older[:limit]
+			hasMoreOlder = true
+		}
+		out.Messages = older
 	}
-	if err := rows.Err(); err != nil {
-		return domain.ChannelHistory{}, err
-	}
-	if len(out.Messages) > limit {
-		out.Messages = out.Messages[:limit]
-		out.Count = limit + 1
-	} else {
-		out.Count = len(out.Messages)
+	out.Count = len(out.Messages)
+	if hasMoreOlder {
+		out.Count = len(out.Messages) + 1
 	}
 	if err := s.populateChannelMessageReplies(ctx, s.db, viewerUserID, channel, out.Messages); err != nil {
 		return domain.ChannelHistory{}, err

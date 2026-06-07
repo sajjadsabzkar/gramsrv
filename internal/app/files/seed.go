@@ -338,8 +338,13 @@ func (s *Service) importDocument(ctx context.Context, dj seedDocumentJSON, binDi
 		stats.Blobs++
 	}
 
-	// 缩略图：PhotoPathSize 内联；小的 PhotoSize 静态图同时写 blob 并作为
-	// PhotoCachedSize 返回，让 TDesktop 处理 document 元数据时即可填本地 image cache。
+	// 缩略图保留两类并存（与官方 sticker 一致）：
+	//   - PhotoPathSize 矢量轮廓：随 document 元数据内联下发，是 TDesktop 对 animated
+	//     sticker 在完整 .tgs 下载完成前唯一可即时渲染的占位（history_view_sticker 显式
+	//     禁用了 stripped 内联占位，cached 字节又经 RPC 出口转成 downloadable）；丢掉它会让
+	//     打开会话时 sticker 先空白、并多触发一次缩略图 getFile。
+	//   - 小 PhotoSize 静态图：写 blob 并暂存为 PhotoCachedSize（RPC 出口再转 downloadable
+	//     photoSize m），供 sticker 面板等需要小缩略图的场景下载。
 	thumbs := make([]domain.PhotoSize, 0, len(dj.Thumbs))
 	for _, tj := range dj.Thumbs {
 		ps, downloadable := seedPhotoSize(tj)
@@ -375,7 +380,7 @@ func (s *Service) importDocument(ctx context.Context, dj seedDocumentJSON, binDi
 		}
 		thumbs = append(thumbs, ps)
 	}
-	doc.Thumbs = seedPreferRasterDocumentThumbs(thumbs)
+	doc.Thumbs = thumbs
 
 	if err := s.media.PutDocument(ctx, doc); err != nil {
 		return domain.Document{}, err
@@ -607,20 +612,6 @@ func seedInlineCachedDocumentThumb(ps domain.PhotoSize, data []byte) domain.Phot
 	return ps
 }
 
-func seedPreferRasterDocumentThumbs(sizes []domain.PhotoSize) []domain.PhotoSize {
-	if !documentThumbsHaveRaster(sizes) {
-		return sizes
-	}
-	out := sizes[:0]
-	for _, size := range sizes {
-		if size.Kind == domain.PhotoSizeKindPath {
-			continue
-		}
-		out = append(out, size)
-	}
-	return out
-}
-
 func seedThumbMimeType(data []byte) string {
 	switch {
 	case len(data) >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F' &&
@@ -677,9 +668,6 @@ func (s *Service) documentsNeedInlineCachedThumbs(ctx context.Context, ids []int
 		return false, err
 	}
 	for _, doc := range docs {
-		if documentThumbsHaveRaster(doc.Thumbs) && documentThumbsHavePath(doc.Thumbs) {
-			return true, nil
-		}
 		for _, thumb := range doc.Thumbs {
 			if thumb.Kind == domain.PhotoSizeKindDefault && thumb.Size > 0 && thumb.Size <= seedInlineCachedDocumentThumbMaxBytes {
 				return true, nil
@@ -699,35 +687,6 @@ func (s *Service) documentsNeedInlineCachedThumbs(ctx context.Context, ids []int
 		}
 	}
 	return false, nil
-}
-
-func documentThumbsHaveRaster(sizes []domain.PhotoSize) bool {
-	for _, size := range sizes {
-		switch size.Kind {
-		case domain.PhotoSizeKindCached:
-			if len(size.Bytes) > 0 {
-				return true
-			}
-		case domain.PhotoSizeKindDefault:
-			if size.Type != "" && size.Size > 0 {
-				return true
-			}
-		case domain.PhotoSizeKindProgressive:
-			if size.Type != "" && len(size.Sizes) > 0 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func documentThumbsHavePath(sizes []domain.PhotoSize) bool {
-	for _, size := range sizes {
-		if size.Kind == domain.PhotoSizeKindPath && len(size.Bytes) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func seedStickerPacks(setPacks, resultPacks []seedStickerPackJSON, docIDBySource map[int64]int64) []domain.StickerPack {

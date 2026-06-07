@@ -155,6 +155,10 @@ func (s *DialogStore) ListByUser(ctx context.Context, userID int64, filter domai
 			if err != nil {
 				return domain.DialogList{}, fmt.Errorf("decode message entities: %w", err)
 			}
+			media, err := decodeMessageMedia(row.MessageMediaJson)
+			if err != nil {
+				return domain.DialogList{}, fmt.Errorf("decode message media: %w", err)
+			}
 			out.Messages = append(out.Messages, domain.Message{
 				ID:          int(row.MessageID),
 				OwnerUserID: row.UserID,
@@ -164,6 +168,7 @@ func (s *DialogStore) ListByUser(ctx context.Context, userID int64, filter domai
 				Out:         row.MessageOutgoing,
 				Body:        row.MessageBody,
 				Entities:    entities,
+				Media:       media,
 			})
 		}
 	}
@@ -241,6 +246,10 @@ func (s *DialogStore) ListByPeers(ctx context.Context, userID int64, peers []dom
 			if err != nil {
 				return domain.DialogList{}, fmt.Errorf("decode message entities: %w", err)
 			}
+			media, err := decodeMessageMedia(row.MessageMediaJson)
+			if err != nil {
+				return domain.DialogList{}, fmt.Errorf("decode message media: %w", err)
+			}
 			out.Messages = append(out.Messages, domain.Message{
 				ID:          int(row.MessageID),
 				OwnerUserID: row.UserID,
@@ -250,6 +259,7 @@ func (s *DialogStore) ListByPeers(ctx context.Context, userID int64, peers []dom
 				Out:         row.MessageOutgoing,
 				Body:        row.MessageBody,
 				Entities:    entities,
+				Media:       media,
 			})
 		}
 	}

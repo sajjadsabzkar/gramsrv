@@ -4348,6 +4348,7 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 				RandomID:   req.RandomID[i],
 				Message:    source.body,
 				Entities:   source.entities,
+				Media:      source.media,
 				Silent:     req.Silent,
 				NoForwards: req.Noforwards,
 				ReplyTo:    replyTo,
@@ -4395,6 +4396,7 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 				RandomID:        req.RandomID[i],
 				Message:         source.body,
 				Entities:        source.entities,
+				Media:           source.media,
 				Silent:          req.Silent,
 				NoForwards:      req.Noforwards,
 				ReplyTo:         replyTo,
@@ -4472,6 +4474,7 @@ func mergeForwardTopMsgID(toPeer domain.Peer, replyTo *domain.MessageReply, topM
 type forwardSource struct {
 	body      string
 	entities  []domain.MessageEntity
+	media     *domain.MessageMedia
 	forward   *domain.MessageForward
 	from      domain.Peer
 	date      int
@@ -4496,17 +4499,14 @@ func (r *Router) forwardSources(ctx context.Context, userID int64, fromPeer doma
 			if r.deps.Messages == nil {
 				return nil, domain.ErrMessageIDInvalid
 			}
-			list, err := r.deps.Messages.GetHistory(ctx, userID, domain.MessageFilter{
-				HasPeer: true,
-				Peer:    fromPeer,
-				Limit:   1,
-				MaxID:   id,
-				MinID:   id - 1,
-			})
+			list, err := r.deps.Messages.GetMessages(ctx, userID, []int{id})
 			if err != nil || len(list.Messages) != 1 || list.Messages[0].ID != id {
 				return nil, domain.ErrMessageIDInvalid
 			}
 			msg := list.Messages[0]
+			if msg.Peer != fromPeer {
+				return nil, domain.ErrMessageIDInvalid
+			}
 			if msg.NoForwards {
 				return nil, domain.ErrChatForwardsRestricted
 			}
@@ -4518,6 +4518,7 @@ func (r *Router) forwardSources(ctx context.Context, userID int64, fromPeer doma
 				body: msg.Body,
 				entities: append([]domain.MessageEntity(nil),
 					msg.Entities...),
+				media:   msg.Media,
 				forward: forward,
 				from:    msg.From,
 				date:    msg.Date,
@@ -4526,12 +4527,7 @@ func (r *Router) forwardSources(ctx context.Context, userID int64, fromPeer doma
 			if r.deps.Channels == nil {
 				return nil, domain.ErrMessageIDInvalid
 			}
-			history, err := r.deps.Channels.GetHistory(ctx, userID, domain.ChannelHistoryFilter{
-				ChannelID: fromPeer.ID,
-				Limit:     1,
-				MaxID:     id,
-				MinID:     id - 1,
-			})
+			history, err := r.deps.Channels.GetMessages(ctx, userID, fromPeer.ID, []int{id})
 			if err != nil || len(history.Messages) != 1 || history.Messages[0].ID != id {
 				return nil, domain.ErrMessageIDInvalid
 			}
@@ -4539,7 +4535,7 @@ func (r *Router) forwardSources(ctx context.Context, userID int64, fromPeer doma
 			if msg.NoForwards || history.Channel.NoForwards {
 				return nil, domain.ErrChatForwardsRestricted
 			}
-			if msg.Body == "" || msg.Action != nil {
+			if msg.Action != nil || (msg.Body == "" && msg.Media.IsZero()) {
 				return nil, domain.ErrMessageIDInvalid
 			}
 			forward := cloneDomainMessageForward(msg.Forward)
@@ -4560,6 +4556,7 @@ func (r *Router) forwardSources(ctx context.Context, userID int64, fromPeer doma
 				body: msg.Body,
 				entities: append([]domain.MessageEntity(nil),
 					msg.Entities...),
+				media:   msg.Media,
 				forward: forward,
 				from:    from,
 				date:    msg.Date,
