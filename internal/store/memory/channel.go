@@ -627,8 +627,7 @@ func (s *ChannelStore) EditChannelAdmin(_ context.Context, req domain.EditChanne
 	})
 	s.refreshChannelCountsLocked(req.ChannelID)
 	channel = s.channels[req.ChannelID]
-	event := s.appendParticipantEventLocked(channel, req.UserID, previous, member, req.Date)
-	channel = s.channels[req.ChannelID]
+	event := transientChannelParticipantEvent(channel.ID, req.UserID, previous, member, req.Date)
 	if msg, ok := s.findMessageLocked(req.ChannelID, channel.TopMessageID); ok {
 		s.upsertChannelDialogLocked(member.UserID, channel, msg, false)
 	}
@@ -702,8 +701,7 @@ func (s *ChannelStore) EditChannelBanned(_ context.Context, req domain.EditChann
 	})
 	s.refreshChannelCountsLocked(req.ChannelID)
 	channel = s.channels[req.ChannelID]
-	event := s.appendParticipantEventLocked(channel, req.UserID, previous, member, req.Date)
-	channel = s.channels[req.ChannelID]
+	event := transientChannelParticipantEvent(channel.ID, req.UserID, previous, member, req.Date)
 	if member.Status == domain.ChannelMemberActive {
 		if msg, ok := s.findMessageLocked(req.ChannelID, channel.TopMessageID); ok {
 			s.upsertChannelDialogLocked(member.UserID, channel, msg, false)
@@ -5142,25 +5140,6 @@ func (s *ChannelStore) nextChannelPtsNLocked(channelID int64, count int) int {
 	return s.ptsSeq[channelID]
 }
 
-func (s *ChannelStore) appendParticipantEventLocked(channel domain.Channel, actorUserID int64, previous, participant domain.ChannelMember, date int) domain.ChannelUpdateEvent {
-	pts := s.nextChannelPtsLocked(channel.ID)
-	channel.Pts = pts
-	s.channels[channel.ID] = channel
-	event := domain.ChannelUpdateEvent{
-		ChannelID:    channel.ID,
-		Type:         domain.ChannelUpdateParticipant,
-		Pts:          pts,
-		PtsCount:     1,
-		Date:         date,
-		SenderUserID: actorUserID,
-		UserIDs:      uniqueNonZeroInt64s(actorUserID, previous.UserID, previous.InviterUserID, participant.UserID, participant.InviterUserID),
-		Previous:     previous,
-		Participant:  participant,
-	}
-	s.events[channel.ID] = append(s.events[channel.ID], event)
-	return cloneChannelEvent(event)
-}
-
 func (s *ChannelStore) appendChannelServiceMessageLocked(channelID, senderUserID int64, date int, action domain.ChannelMessageAction) (domain.ChannelMessage, domain.ChannelUpdateEvent) {
 	channel := s.channels[channelID]
 	pts := s.nextChannelPtsLocked(channelID)
@@ -5187,6 +5166,18 @@ func (s *ChannelStore) appendChannelServiceMessageLocked(channelID, senderUserID
 	s.messages[channelID] = append(s.messages[channelID], msg)
 	s.events[channelID] = append(s.events[channelID], event)
 	return msg, event
+}
+
+func transientChannelParticipantEvent(channelID, actorUserID int64, previous, participant domain.ChannelMember, date int) domain.ChannelUpdateEvent {
+	return domain.ChannelUpdateEvent{
+		ChannelID:    channelID,
+		Type:         domain.ChannelUpdateParticipant,
+		Date:         date,
+		SenderUserID: actorUserID,
+		UserIDs:      uniqueNonZeroInt64s(actorUserID, previous.UserID, previous.InviterUserID, participant.UserID, participant.InviterUserID),
+		Previous:     previous,
+		Participant:  participant,
+	}
 }
 
 func (s *ChannelStore) channelForMemberLocked(userID, channelID int64) (domain.Channel, error) {

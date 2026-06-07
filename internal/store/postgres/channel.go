@@ -798,11 +798,9 @@ func (s *ChannelStore) EditChannelAdmin(ctx context.Context, req domain.EditChan
 		return domain.EditChannelAdminResult{}, fmt.Errorf("begin edit channel admin: %w", err)
 	}
 	committed := false
-	var reserved []reservedChannelPts
 	defer func() {
 		if !committed {
 			_ = tx.Rollback(ctx)
-			s.recordChannelPtsGaps(ctx, reserved, req.Date)
 		}
 	}()
 	channel, actor, err := s.getChannelForMember(ctx, tx, req.UserID, req.ChannelID)
@@ -873,10 +871,7 @@ func (s *ChannelStore) EditChannelAdmin(ctx context.Context, req domain.EditChan
 	if err != nil {
 		return domain.EditChannelAdminResult{}, err
 	}
-	event, channel, err := s.insertParticipantEventTx(ctx, tx, channel, req.UserID, previous, member, req.Date, &reserved)
-	if err != nil {
-		return domain.EditChannelAdminResult{}, err
-	}
+	event := transientChannelParticipantEvent(channel.ID, req.UserID, previous, member, req.Date)
 	msg, _ := s.getChannelMessage(ctx, tx, req.ChannelID, channel.TopMessageID)
 	if err := upsertChannelDialogTx(ctx, tx, member.UserID, channel, msg, member.ReadInboxMaxID, member.ReadOutboxMaxID); err != nil {
 		return domain.EditChannelAdminResult{}, err
@@ -906,11 +901,9 @@ func (s *ChannelStore) EditChannelBanned(ctx context.Context, req domain.EditCha
 		return domain.EditChannelBannedResult{}, fmt.Errorf("begin edit channel banned: %w", err)
 	}
 	committed := false
-	var reserved []reservedChannelPts
 	defer func() {
 		if !committed {
 			_ = tx.Rollback(ctx)
-			s.recordChannelPtsGaps(ctx, reserved, req.Date)
 		}
 	}()
 	channel, actor, err := s.getChannelForMember(ctx, tx, req.UserID, req.ChannelID)
@@ -979,10 +972,7 @@ func (s *ChannelStore) EditChannelBanned(ctx context.Context, req domain.EditCha
 	if err != nil {
 		return domain.EditChannelBannedResult{}, err
 	}
-	event, channel, err := s.insertParticipantEventTx(ctx, tx, channel, req.UserID, previous, member, req.Date, &reserved)
-	if err != nil {
-		return domain.EditChannelBannedResult{}, err
-	}
+	event := transientChannelParticipantEvent(channel.ID, req.UserID, previous, member, req.Date)
 	if member.Status == domain.ChannelMemberActive {
 		msg, _ := s.getChannelMessage(ctx, tx, req.ChannelID, channel.TopMessageID)
 		if err := upsertChannelDialogTx(ctx, tx, member.UserID, channel, msg, member.ReadInboxMaxID, member.ReadOutboxMaxID); err != nil {
@@ -8025,31 +8015,16 @@ func (s *ChannelStore) insertServiceMessage(ctx context.Context, tx pgx.Tx, chan
 	return msg, event, nil
 }
 
-func (s *ChannelStore) insertParticipantEventTx(ctx context.Context, tx pgx.Tx, channel domain.Channel, actorUserID int64, previous, participant domain.ChannelMember, date int, reserved *[]reservedChannelPts) (domain.ChannelUpdateEvent, domain.Channel, error) {
-	pts, err := s.pts.NextChannelPts(ctx, channel.ID)
-	if err != nil {
-		return domain.ChannelUpdateEvent{}, channel, fmt.Errorf("allocate channel participant pts: %w", err)
-	}
-	reserveChannelPts(reserved, channel.ID, pts, 1)
-	event := domain.ChannelUpdateEvent{
-		ChannelID:    channel.ID,
+func transientChannelParticipantEvent(channelID, actorUserID int64, previous, participant domain.ChannelMember, date int) domain.ChannelUpdateEvent {
+	return domain.ChannelUpdateEvent{
+		ChannelID:    channelID,
 		Type:         domain.ChannelUpdateParticipant,
-		Pts:          pts,
-		PtsCount:     1,
 		Date:         date,
 		SenderUserID: actorUserID,
 		UserIDs:      uniqueNonZeroInt64s(actorUserID, previous.UserID, previous.InviterUserID, participant.UserID, participant.InviterUserID),
 		Previous:     previous,
 		Participant:  participant,
 	}
-	if err := insertChannelEventTx(ctx, tx, event); err != nil {
-		return domain.ChannelUpdateEvent{}, channel, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE channels SET pts = $2, updated_at = now() WHERE id = $1`, channel.ID, pts); err != nil {
-		return domain.ChannelUpdateEvent{}, channel, fmt.Errorf("update channel participant pts: %w", err)
-	}
-	channel.Pts = pts
-	return event, channel, nil
 }
 
 func (s *ChannelStore) deleteChannelMessagesTx(ctx context.Context, tx pgx.Tx, channel domain.Channel, member domain.ChannelMember, ids []int, actorUserID int64, date int, reserved *[]reservedChannelPts) ([]int, domain.ChannelUpdateEvent, domain.Channel, error) {

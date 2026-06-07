@@ -1861,9 +1861,9 @@ func (r *Router) onChannelsEditAdmin(ctx context.Context, req *tg.ChannelsEditAd
 	} else {
 		r.removeOnlineChannelMemberships(res.Channel.ID, res.Participant.UserID)
 	}
-	updates := r.channelParticipantUpdates(ctx, userID, userID, res.Channel, res.Previous, res.Participant, res.Event, res.Date)
+	updates := r.channelParticipantUpdates(ctx, userID, userID, res.Channel, res.Previous, res.Participant, res.Date)
 	r.pushChannelUpdates(ctx, userID, res.Channel.ID, res.Recipients, func(viewerUserID int64) *tg.Updates {
-		return r.channelParticipantUpdates(ctx, viewerUserID, userID, res.Channel, res.Previous, res.Participant, res.Event, res.Date)
+		return r.channelParticipantUpdates(ctx, viewerUserID, userID, res.Channel, res.Previous, res.Participant, res.Date)
 	})
 	return updates, nil
 }
@@ -1894,9 +1894,9 @@ func (r *Router) onChannelsEditBanned(ctx context.Context, req *tg.ChannelsEditB
 	if err != nil {
 		return nil, channelAdminErr(err)
 	}
-	updates := r.channelParticipantUpdates(ctx, userID, userID, res.Channel, res.Previous, res.Participant, res.Event, res.Date)
+	updates := r.channelParticipantUpdates(ctx, userID, userID, res.Channel, res.Previous, res.Participant, res.Date)
 	r.pushChannelUpdates(ctx, userID, res.Channel.ID, res.Recipients, func(viewerUserID int64) *tg.Updates {
-		return r.channelParticipantUpdates(ctx, viewerUserID, userID, res.Channel, res.Previous, res.Participant, res.Event, res.Date)
+		return r.channelParticipantUpdates(ctx, viewerUserID, userID, res.Channel, res.Previous, res.Participant, res.Date)
 	})
 	return updates, nil
 }
@@ -2904,7 +2904,7 @@ func (r *Router) channelTitleUpdates(ctx context.Context, viewerUserID int64, re
 	}
 }
 
-func (r *Router) channelParticipantUpdates(ctx context.Context, viewerUserID, actorUserID int64, channel domain.Channel, previous, participant domain.ChannelMember, event domain.ChannelUpdateEvent, date int) *tg.Updates {
+func (r *Router) channelParticipantUpdates(ctx context.Context, viewerUserID, actorUserID int64, channel domain.Channel, previous, participant domain.ChannelMember, date int) *tg.Updates {
 	update := &tg.UpdateChannelParticipant{
 		ChannelID: channel.ID,
 		Date:      date,
@@ -2920,14 +2920,8 @@ func (r *Router) channelParticipantUpdates(ctx context.Context, viewerUserID, ac
 	if participant.UserID != 0 {
 		update.SetNewParticipant(tgChannelParticipantForUpdate(viewerUserID, participant))
 	}
-	updates := []tg.UpdateClass{update, &tg.UpdateChannel{ChannelID: channel.ID}}
-	if event.Pts > 0 {
-		tooLong := &tg.UpdateChannelTooLong{ChannelID: channel.ID}
-		tooLong.SetPts(event.Pts)
-		updates = append(updates, tooLong)
-	}
 	return &tg.Updates{
-		Updates: updates,
+		Updates: []tg.UpdateClass{update, &tg.UpdateChannel{ChannelID: channel.ID}},
 		Users:   r.tgUsersForIDs(ctx, viewerUserID, []int64{participant.UserID, participant.InviterUserID, previous.UserID, previous.InviterUserID, update.ActorID}),
 		Chats:   []tg.ChatClass{tgChannelChat(viewerUserID, channel, nil)},
 		Date:    int(r.clock.Now().Unix()),

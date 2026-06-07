@@ -39,6 +39,69 @@ func TestChannelRealtimeRecipientsAreCapped(t *testing.T) {
 	}
 }
 
+func TestChannelAdminAndBanDoNotAdvanceChannelPts(t *testing.T) {
+	ctx := context.Background()
+	store := NewChannelStore()
+	created, err := store.CreateChannel(ctx, domain.CreateChannelRequest{
+		CreatorUserID: 1,
+		Title:         "participant state no pts",
+		Megagroup:     true,
+		MemberUserIDs: []int64{2},
+		Date:          1_700_000_120,
+	})
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	channelID := created.Channel.ID
+	ptsFloor := created.Channel.Pts
+
+	promoted, err := store.EditChannelAdmin(ctx, domain.EditChannelAdminRequest{
+		UserID:    1,
+		ChannelID: channelID,
+		MemberID:  2,
+		AdminRights: domain.ChannelAdminRights{
+			InviteUsers: true,
+		},
+		Date: 1_700_000_121,
+	})
+	if err != nil {
+		t.Fatalf("edit admin: %v", err)
+	}
+	if promoted.Event.Pts != 0 || promoted.Event.PtsCount != 0 || promoted.Channel.Pts != ptsFloor {
+		t.Fatalf("edit admin pts = event(%d,%d) channel %d, want unchanged %d", promoted.Event.Pts, promoted.Event.PtsCount, promoted.Channel.Pts, ptsFloor)
+	}
+
+	banned, err := store.EditChannelBanned(ctx, domain.EditChannelBannedRequest{
+		UserID:      1,
+		ChannelID:   channelID,
+		Participant: domain.Peer{Type: domain.PeerTypeUser, ID: 2},
+		BannedRights: domain.ChannelBannedRights{
+			ViewMessages: true,
+			UntilDate:    1_700_001_121,
+		},
+		Date: 1_700_000_122,
+	})
+	if err != nil {
+		t.Fatalf("edit banned: %v", err)
+	}
+	if banned.Event.Pts != 0 || banned.Event.PtsCount != 0 || banned.Channel.Pts != ptsFloor {
+		t.Fatalf("edit banned pts = event(%d,%d) channel %d, want unchanged %d", banned.Event.Pts, banned.Event.PtsCount, banned.Channel.Pts, ptsFloor)
+	}
+
+	diff, err := store.ListChannelDifference(ctx, domain.ChannelDifferenceRequest{
+		UserID:    1,
+		ChannelID: channelID,
+		Pts:       ptsFloor,
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("list difference: %v", err)
+	}
+	if len(diff.Events) != 0 || diff.Pts != ptsFloor {
+		t.Fatalf("difference after participant state change = %+v, want no durable events at pts %d", diff, ptsFloor)
+	}
+}
+
 func TestPendingJoinRequestsSummaryAndInviteAdmins(t *testing.T) {
 	ctx := context.Background()
 	store := NewChannelStore()

@@ -4186,6 +4186,11 @@ func TestChannelAdminPinInviteRPC(t *testing.T) {
 		t.Fatalf("create chat: %v", err)
 	}
 	channel := created.Updates.(*tg.Updates).Chats[0].(*tg.Channel)
+	createdChannel, err := channelStore.GetChannelByID(ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("get created channel: %v", err)
+	}
+	initialChannelPts := createdChannel.Pts
 
 	selfParticipant, err := r.onChannelsGetParticipant(WithUserID(ctx, friend.ID), &tg.ChannelsGetParticipantRequest{
 		Channel:     &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
@@ -4229,29 +4234,25 @@ func TestChannelAdminPinInviteRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("edit admin: %v", err)
 	}
-	if updates := adminUpdates.(*tg.Updates); len(updates.Updates) < 3 {
-		t.Fatalf("admin updates empty, want participant update")
+	if updates := adminUpdates.(*tg.Updates); len(updates.Updates) != 2 {
+		t.Fatalf("admin updates = %+v, want participant update and channel refresh", updates.Updates)
 	} else if _, ok := updates.Updates[0].(*tg.UpdateChannelParticipant); !ok {
 		t.Fatalf("admin update[0] = %T, want updateChannelParticipant", updates.Updates[0])
-	} else if tooLong, ok := updates.Updates[2].(*tg.UpdateChannelTooLong); !ok {
-		t.Fatalf("admin update[2] = %T, want updateChannelTooLong", updates.Updates[2])
-	} else if pts, ok := tooLong.GetPts(); !ok || pts == 0 {
-		t.Fatalf("admin updateChannelTooLong pts = %d ok=%v, want set pts", pts, ok)
+	} else if _, ok := updates.Updates[1].(*tg.UpdateChannel); !ok {
+		t.Fatalf("admin update[1] = %T, want updateChannel", updates.Updates[1])
 	}
 	adminDiff, err := r.onUpdatesGetChannelDifference(WithUserID(ctx, friend.ID), &tg.UpdatesGetChannelDifferenceRequest{
 		Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
 		Filter:  &tg.ChannelMessagesFilterEmpty{},
-		Pts:     1,
+		Pts:     initialChannelPts,
 		Limit:   10,
 	})
 	if err != nil {
 		t.Fatalf("channel difference after admin: %v", err)
 	}
-	adminFullDiff, ok := adminDiff.(*tg.UpdatesChannelDifference)
-	if !ok || len(adminFullDiff.OtherUpdates) == 0 {
-		t.Fatalf("admin diff = %T %+v, want participant other update", adminDiff, adminDiff)
-	} else if _, ok := adminFullDiff.OtherUpdates[0].(*tg.UpdateChannelParticipant); !ok {
-		t.Fatalf("admin diff update[0] = %T, want updateChannelParticipant", adminFullDiff.OtherUpdates[0])
+	adminEmptyDiff, ok := adminDiff.(*tg.UpdatesChannelDifferenceEmpty)
+	if !ok || !adminEmptyDiff.Final || adminEmptyDiff.Pts != initialChannelPts {
+		t.Fatalf("admin diff = %T %+v, want empty difference at unchanged pts %d", adminDiff, adminDiff, initialChannelPts)
 	}
 	admins, err := r.onChannelsGetParticipants(WithUserID(ctx, owner.ID), &tg.ChannelsGetParticipantsRequest{
 		Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},

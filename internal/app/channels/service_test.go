@@ -784,6 +784,7 @@ func TestChannelAdminTitlePinAndInvite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateMegagroupFromCreateChat: %v", err)
 	}
+	ptsBeforeAdmin := created.Channel.Pts
 
 	admin, err := service.EditAdmin(ctx, 1001, domain.EditChannelAdminRequest{
 		ChannelID: created.Channel.ID,
@@ -802,15 +803,18 @@ func TestChannelAdminTitlePinAndInvite(t *testing.T) {
 	if admin.Participant.Role != domain.ChannelRoleAdmin || !admin.Participant.AdminRights.PinMessages || admin.Channel.AdminsCount != 2 {
 		t.Fatalf("admin result = %+v, want promoted admin with counts", admin)
 	}
-	if admin.Event.Type != domain.ChannelUpdateParticipant || admin.Event.PtsCount != 1 || admin.Event.Participant.UserID != 1002 || admin.Event.Previous.UserID != 1002 {
-		t.Fatalf("admin participant event = %+v, want durable participant transition", admin.Event)
+	if admin.Channel.Pts != ptsBeforeAdmin {
+		t.Fatalf("admin channel pts = %d, want unchanged %d", admin.Channel.Pts, ptsBeforeAdmin)
 	}
-	diffAfterAdmin, err := service.GetDifference(ctx, 1002, domain.ChannelDifferenceRequest{ChannelID: created.Channel.ID, Pts: 1, Limit: 10})
+	if admin.Event.Type != domain.ChannelUpdateParticipant || admin.Event.Pts != 0 || admin.Event.PtsCount != 0 || admin.Event.Participant.UserID != 1002 || admin.Event.Previous.UserID != 1002 {
+		t.Fatalf("admin participant event = %+v, want transient participant transition", admin.Event)
+	}
+	diffAfterAdmin, err := service.GetDifference(ctx, 1002, domain.ChannelDifferenceRequest{ChannelID: created.Channel.ID, Pts: ptsBeforeAdmin, Limit: 10})
 	if err != nil {
 		t.Fatalf("GetDifference after admin: %v", err)
 	}
-	if len(diffAfterAdmin.OtherUpdates) != 1 || diffAfterAdmin.OtherUpdates[0].Type != domain.ChannelUpdateParticipant {
-		t.Fatalf("diff after admin = %+v, want participant update in channel difference", diffAfterAdmin)
+	if len(diffAfterAdmin.OtherUpdates) != 0 || diffAfterAdmin.Pts != ptsBeforeAdmin {
+		t.Fatalf("diff after admin = %+v, want no durable participant update", diffAfterAdmin)
 	}
 	admins, err := service.GetParticipants(ctx, 1001, created.Channel.ID, domain.ChannelParticipantsFilter{Kind: domain.ChannelParticipantsAdmins}, 0, 10)
 	if err != nil {
@@ -995,6 +999,7 @@ func TestChannelBanAndDeletePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateMegagroupFromCreateChat: %v", err)
 	}
+	ptsBeforeBan := created.Channel.Pts
 	if _, err := service.DeleteChannel(ctx, 1002, domain.DeleteChannelRequest{ChannelID: created.Channel.ID, Date: 11}); !errors.Is(err, domain.ErrChannelAdminRequired) {
 		t.Fatalf("member DeleteChannel err = %v, want ErrChannelAdminRequired", err)
 	}
@@ -1013,8 +1018,11 @@ func TestChannelBanAndDeletePermissions(t *testing.T) {
 	if banned.Participant.Status != domain.ChannelMemberKicked || banned.Channel.ParticipantsCount != 1 || banned.Channel.KickedCount != 1 {
 		t.Fatalf("banned = %+v, want kicked participant and counts", banned)
 	}
-	if banned.Event.Type != domain.ChannelUpdateParticipant || banned.Event.Participant.Status != domain.ChannelMemberKicked || banned.Event.PtsCount != 1 {
-		t.Fatalf("ban participant event = %+v, want durable kicked transition", banned.Event)
+	if banned.Channel.Pts != ptsBeforeBan {
+		t.Fatalf("banned channel pts = %d, want unchanged %d", banned.Channel.Pts, ptsBeforeBan)
+	}
+	if banned.Event.Type != domain.ChannelUpdateParticipant || banned.Event.Participant.Status != domain.ChannelMemberKicked || banned.Event.Pts != 0 || banned.Event.PtsCount != 0 {
+		t.Fatalf("ban participant event = %+v, want transient kicked transition", banned.Event)
 	}
 	kicked, err := service.GetParticipants(ctx, 1001, created.Channel.ID, domain.ChannelParticipantsFilter{Kind: domain.ChannelParticipantsKicked}, 0, 10)
 	if err != nil {
@@ -1348,6 +1356,7 @@ func TestChannelDifferenceStartsAtMemberAvailableMinPts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateMegagroupFromCreateChat: %v", err)
 	}
+	ptsFloor := created.Channel.Pts
 	promoted, err := service.EditAdmin(ctx, 1001, domain.EditChannelAdminRequest{
 		ChannelID: created.Channel.ID,
 		MemberID:  1002,
@@ -1359,12 +1368,15 @@ func TestChannelDifferenceStartsAtMemberAvailableMinPts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EditAdmin: %v", err)
 	}
+	if promoted.Event.Pts != 0 || promoted.Channel.Pts != ptsFloor {
+		t.Fatalf("promoted = %+v, want transient admin event and unchanged pts %d", promoted, ptsFloor)
+	}
 	joined, err := service.JoinChannel(ctx, 1003, created.Channel.ID, 12)
 	if err != nil {
 		t.Fatalf("JoinChannel: %v", err)
 	}
-	if joined.Members[0].AvailableMinPts != promoted.Event.Pts {
-		t.Fatalf("joined available_min_pts = %d, want pre-join channel pts %d", joined.Members[0].AvailableMinPts, promoted.Event.Pts)
+	if joined.Members[0].AvailableMinPts != ptsFloor {
+		t.Fatalf("joined available_min_pts = %d, want pre-join channel pts %d", joined.Members[0].AvailableMinPts, ptsFloor)
 	}
 	diff, err := service.GetDifference(ctx, 1003, domain.ChannelDifferenceRequest{ChannelID: created.Channel.ID, Pts: 0, Limit: 100})
 	if err != nil {
@@ -1374,13 +1386,13 @@ func TestChannelDifferenceStartsAtMemberAvailableMinPts(t *testing.T) {
 		t.Fatalf("diff pts = %d, want current channel pts %d", diff.Pts, joined.Channel.Pts)
 	}
 	for _, msg := range diff.NewMessages {
-		if msg.Pts <= promoted.Event.Pts {
-			t.Fatalf("diff leaks pre-join message %+v at or before available_min_pts %d", msg, promoted.Event.Pts)
+		if msg.Pts <= ptsFloor {
+			t.Fatalf("diff leaks pre-join message %+v at or before available_min_pts %d", msg, ptsFloor)
 		}
 	}
 	for _, event := range diff.OtherUpdates {
-		if event.Pts <= promoted.Event.Pts {
-			t.Fatalf("diff leaks pre-join event %+v at or before available_min_pts %d", event, promoted.Event.Pts)
+		if event.Pts <= ptsFloor {
+			t.Fatalf("diff leaks pre-join event %+v at or before available_min_pts %d", event, ptsFloor)
 		}
 	}
 }

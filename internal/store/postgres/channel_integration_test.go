@@ -689,7 +689,8 @@ func TestChannelStoreJoinRejectsKickedMember(t *testing.T) {
 		t.Fatalf("create channel: %v", err)
 	}
 	channelID = created.Channel.ID
-	if _, err := channels.EditChannelBanned(ctx, domain.EditChannelBannedRequest{
+	ptsFloor := created.Channel.Pts
+	banned, err := channels.EditChannelBanned(ctx, domain.EditChannelBannedRequest{
 		UserID:      owner.ID,
 		ChannelID:   channelID,
 		Participant: domain.Peer{Type: domain.PeerTypeUser, ID: member.ID},
@@ -698,8 +699,24 @@ func TestChannelStoreJoinRejectsKickedMember(t *testing.T) {
 			UntilDate:    1700001300,
 		},
 		Date: 1700000306,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("kick member: %v", err)
+	}
+	if banned.Event.Pts != 0 || banned.Event.PtsCount != 0 || banned.Channel.Pts != ptsFloor {
+		t.Fatalf("kick affected channel pts = event(%d,%d) channel %d, want no pts advance from %d", banned.Event.Pts, banned.Event.PtsCount, banned.Channel.Pts, ptsFloor)
+	}
+	banDiff, err := channels.ListChannelDifference(ctx, domain.ChannelDifferenceRequest{
+		UserID:    owner.ID,
+		ChannelID: channelID,
+		Pts:       ptsFloor,
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("difference after kick: %v", err)
+	}
+	if len(banDiff.Events) != 0 || banDiff.Pts != ptsFloor {
+		t.Fatalf("difference after kick = %+v, want no durable participant event at pts %d", banDiff, ptsFloor)
 	}
 	if _, err := channels.JoinChannel(ctx, channelID, member.ID, 1700000307); !errors.Is(err, domain.ErrChannelUserBanned) {
 		t.Fatalf("kicked JoinChannel err = %v, want ErrChannelUserBanned", err)
@@ -1292,6 +1309,7 @@ func TestChannelStoreDifferenceStartsAtMemberAvailableMinPts(t *testing.T) {
 		t.Fatalf("create channel: %v", err)
 	}
 	channelID = created.Channel.ID
+	ptsFloor := created.Channel.Pts
 	promoted, err := channels.EditChannelAdmin(ctx, domain.EditChannelAdminRequest{
 		UserID:    owner.ID,
 		ChannelID: channelID,
@@ -1304,12 +1322,27 @@ func TestChannelStoreDifferenceStartsAtMemberAvailableMinPts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("edit admin: %v", err)
 	}
+	if promoted.Event.Pts != 0 || promoted.Event.PtsCount != 0 || promoted.Channel.Pts != ptsFloor {
+		t.Fatalf("promote affected channel pts = event(%d,%d) channel %d, want no pts advance from %d", promoted.Event.Pts, promoted.Event.PtsCount, promoted.Channel.Pts, ptsFloor)
+	}
+	adminDiff, err := channels.ListChannelDifference(ctx, domain.ChannelDifferenceRequest{
+		UserID:    member.ID,
+		ChannelID: channelID,
+		Pts:       ptsFloor,
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("difference after promote: %v", err)
+	}
+	if len(adminDiff.Events) != 0 || adminDiff.Pts != ptsFloor {
+		t.Fatalf("difference after promote = %+v, want no durable participant event at pts %d", adminDiff, ptsFloor)
+	}
 	joined, err := channels.JoinChannel(ctx, channelID, joiner.ID, 1700000352)
 	if err != nil {
 		t.Fatalf("join channel: %v", err)
 	}
-	if len(joined.Members) != 1 || joined.Members[0].AvailableMinPts != promoted.Event.Pts {
-		t.Fatalf("joined members = %+v, want available_min_pts %d", joined.Members, promoted.Event.Pts)
+	if len(joined.Members) != 1 || joined.Members[0].AvailableMinPts != ptsFloor {
+		t.Fatalf("joined members = %+v, want available_min_pts %d", joined.Members, ptsFloor)
 	}
 	diff, err := channels.ListChannelDifference(ctx, domain.ChannelDifferenceRequest{
 		UserID:    joiner.ID,
@@ -1324,13 +1357,13 @@ func TestChannelStoreDifferenceStartsAtMemberAvailableMinPts(t *testing.T) {
 		t.Fatalf("diff pts = %d, want current channel pts %d", diff.Pts, joined.Channel.Pts)
 	}
 	for _, msg := range diff.NewMessages {
-		if msg.Pts <= promoted.Event.Pts {
-			t.Fatalf("diff leaks pre-join message %+v at or before available_min_pts %d", msg, promoted.Event.Pts)
+		if msg.Pts <= ptsFloor {
+			t.Fatalf("diff leaks pre-join message %+v at or before available_min_pts %d", msg, ptsFloor)
 		}
 	}
 	for _, event := range diff.OtherUpdates {
-		if event.Pts <= promoted.Event.Pts {
-			t.Fatalf("diff leaks pre-join event %+v at or before available_min_pts %d", event, promoted.Event.Pts)
+		if event.Pts <= ptsFloor {
+			t.Fatalf("diff leaks pre-join event %+v at or before available_min_pts %d", event, ptsFloor)
 		}
 	}
 }
