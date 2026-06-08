@@ -2,6 +2,8 @@ package mtprotoedge
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -125,6 +127,9 @@ func (s *Server) handleEncrypted(ctx context.Context, tc transport.Conn, cs *con
 		)
 		return current, s.sendBadMsg(ctx, current, data.MessageID, data.SeqNo, code)
 	}
+	if err := sendQuickAckIfRequested(ctx, tc, key, data); err != nil {
+		return current, err
+	}
 
 	content := clientMessageNeedsAck(typeID)
 	if record, ok := cs.seenRecord(data.MessageID); ok {
@@ -168,6 +173,30 @@ func (s *Server) handleEncrypted(ctx context.Context, tc transport.Conn, cs *con
 		}
 	}
 	return current, nil
+}
+
+func sendQuickAckIfRequested(ctx context.Context, tc transport.Conn, key crypto.AuthKey, data *crypto.EncryptedMessageData) error {
+	q, ok := tc.(quickAckTransport)
+	if !ok || !q.ConsumeQuickAckRequested() {
+		return nil
+	}
+	token, err := clientQuickAckToken(key, data)
+	if err != nil {
+		return err
+	}
+	return q.SendQuickAck(ctx, token)
+}
+
+func clientQuickAckToken(key crypto.AuthKey, data *crypto.EncryptedMessageData) (uint32, error) {
+	var plain bin.Buffer
+	if err := data.Encode(&plain); err != nil {
+		return 0, err
+	}
+	h := sha256.New()
+	_, _ = h.Write(key.Value[88:120])
+	_, _ = h.Write(plain.Raw())
+	sum := h.Sum(nil)
+	return binary.LittleEndian.Uint32(sum[:4]) &^ quickAckResponseFlag, nil
 }
 
 // dispatch 处理一条明文消息：解包 container/gzip，处理服务消息，其余转 RPC 路由。
@@ -560,6 +589,9 @@ func validateClientEnvelope(now time.Time, msgID int64, seqNo int32, typeID uint
 	if msgTime.After(now.Add(30 * time.Second)) {
 		return badMsgIDTooHigh
 	}
+	if clientMessageAllowsEitherSeqParity(typeID) {
+		return 0
+	}
 	if clientMessageNeedsAck(typeID) {
 		if seqNo%2 == 0 {
 			return badMsgSeqNotOdd
@@ -593,6 +625,9 @@ func validateClientContainerEnvelope(msgID int64, seqNo int32, typeID uint32) in
 	if msgID == 0 || proto.MessageID(msgID).Type() != proto.MessageFromClient {
 		return badMsgIDInvalidBits
 	}
+	if clientMessageAllowsEitherSeqParity(typeID) {
+		return 0
+	}
 	if clientMessageNeedsAck(typeID) {
 		if seqNo%2 == 0 {
 			return badMsgSeqNotOdd
@@ -601,6 +636,15 @@ func validateClientContainerEnvelope(msgID int64, seqNo int32, typeID uint32) in
 		return badMsgSeqNotEven
 	}
 	return 0
+}
+
+func clientMessageAllowsEitherSeqParity(typeID uint32) bool {
+	switch typeID {
+	case mt.PingDelayDisconnectRequestTypeID:
+		return true
+	default:
+		return false
+	}
 }
 
 func clientMessageNeedsAck(typeID uint32) bool {

@@ -488,8 +488,16 @@ func (m *SessionManager) PushToUserExceptAuthKeySession(ctx context.Context, use
 }
 
 func (m *SessionManager) pushToUser(ctx context.Context, userID int64, excludeAuthKeyID *[8]byte, excludeSessionID int64, t proto.MessageType, msg bin.Encoder) (int, error) {
+	getEncoded := onceEncodedOutbound(msg)
 	return m.pushToUserWithSender(ctx, userID, excludeAuthKeyID, excludeSessionID, t, msg, func(c *Conn) error {
-		return c.Send(ctx, t, msg)
+		if c.outbound == nil || c.outboundControl == nil {
+			return ErrConnClosed
+		}
+		encoded, err := getEncoded()
+		if err != nil {
+			return err
+		}
+		return c.SendEncoded(ctx, t, encoded)
 	})
 }
 
@@ -502,9 +510,30 @@ func (m *SessionManager) PushToUserExceptAuthKeySessionBestEffort(ctx context.Co
 }
 
 func (m *SessionManager) pushToUserBestEffort(ctx context.Context, userID int64, excludeAuthKeyID *[8]byte, excludeSessionID int64, t proto.MessageType, msg bin.Encoder, timeout time.Duration) (int, error) {
+	getEncoded := onceEncodedOutbound(msg)
 	return m.pushToUserWithSender(ctx, userID, excludeAuthKeyID, excludeSessionID, t, msg, func(c *Conn) error {
-		return c.SendBestEffort(ctx, t, msg, timeout)
+		if c.outbound == nil || c.outboundControl == nil {
+			return ErrConnClosed
+		}
+		encoded, err := getEncoded()
+		if err != nil {
+			return err
+		}
+		return c.SendBestEffortEncoded(ctx, t, encoded, timeout)
 	})
+}
+
+func onceEncodedOutbound(msg bin.Encoder) func() (*encodedOutboundMessage, error) {
+	var (
+		encoded *encodedOutboundMessage
+		err     error
+	)
+	return func() (*encodedOutboundMessage, error) {
+		if encoded == nil && err == nil {
+			encoded, err = encodeOutboundMessage(msg)
+		}
+		return encoded, err
+	}
 }
 
 func (m *SessionManager) pushToUserWithSender(ctx context.Context, userID int64, excludeAuthKeyID *[8]byte, excludeSessionID int64, t proto.MessageType, msg bin.Encoder, send func(*Conn) error) (int, error) {

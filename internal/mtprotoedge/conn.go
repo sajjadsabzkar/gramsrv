@@ -57,6 +57,9 @@ type Conn struct {
 
 	// sentContentMessages 只由 outbound actor 访问，用于生成 MTProto seq_no。
 	sentContentMessages int32
+	// outboundPlain/outboundWire 只由 outbound actor 访问，用于复用出站加密缓冲。
+	outboundPlain bin.Buffer
+	outboundWire  bin.Buffer
 
 	identityMu              sync.RWMutex
 	businessAuthKeyID       [8]byte

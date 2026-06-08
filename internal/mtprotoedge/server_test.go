@@ -163,3 +163,63 @@ func TestServerAcceptObfuscatedAbridged(t *testing.T) {
 		t.Fatal("server did not stop after ctx cancel")
 	}
 }
+
+func TestServerAcceptObfuscatedAbridgedQuickAckFrame(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	frames := make(chan int, 1)
+	srv := New(Options{Logger: zaptest.NewLogger(t), ObfuscatedTCP: true})
+	srv.onFrame = func(n int) {
+		select {
+		case frames <- n:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ctx, ln) }()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	obfs := obfuscator.Obfuscated2(rand.Reader, raw)
+	if err := obfs.Handshake((codec.Abridged{}).ObfuscatedTag(), 2, mtproxy.Secret{}); err != nil {
+		t.Fatalf("obfuscated handshake: %v", err)
+	}
+
+	var b bin.Buffer
+	b.PutInt32(0x12345678)
+	b.PutInt32(0x0badf00d)
+	packet := append([]byte{0x80 | byte(b.Len()/4)}, b.Raw()...)
+	if _, err := obfs.Write(packet); err != nil {
+		t.Fatalf("write quick ack frame: %v", err)
+	}
+
+	select {
+	case n := <-frames:
+		if n != b.Len() {
+			t.Fatalf("received frame len = %d, want %d", n, b.Len())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not receive quick-ack abridged frame in time")
+	}
+
+	_ = raw.Close()
+
+	cancel()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("serve returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop after ctx cancel")
+	}
+}

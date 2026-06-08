@@ -8,10 +8,20 @@ import (
 
 	"go.uber.org/zap/zaptest"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/tg"
 )
+
+type countingOutboundEncoder struct {
+	count *int
+}
+
+func (e *countingOutboundEncoder) Encode(b *bin.Buffer) error {
+	*e.count++
+	return (&tg.UpdatesTooLong{}).Encode(b)
+}
 
 // TestSessionManagerRegistry 验证注册表的注册/注销/查找语义（不涉及网络发送）。
 func TestSessionManagerRegistry(t *testing.T) {
@@ -48,6 +58,43 @@ func TestSessionManagerRegistry(t *testing.T) {
 	err := sm.PushToSession(context.Background(), 42, proto.MessageFromServer, &tg.UpdatesTooLong{})
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("push to missing session err = %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestSessionManagerBestEffortFanoutPreencodesOnce(t *testing.T) {
+	sm := NewSessionManager(zaptest.NewLogger(t))
+	const userID = int64(100)
+	for i := 0; i < 2; i++ {
+		c := &Conn{
+			sessionID:       int64(i + 1),
+			authKeyID:       [8]byte{byte(i + 1)},
+			outbound:        make(chan outboundOp, 1),
+			outboundControl: make(chan outboundOp, 1),
+			outboundStop:    make(chan struct{}),
+		}
+		c.userID.Store(userID)
+		c.userIDResolved.Store(true)
+		c.receivesUpdates.Store(true)
+		sm.Register(c)
+	}
+
+	encodes := 0
+	sent, err := sm.PushToUserExceptSessionBestEffort(
+		context.Background(),
+		userID,
+		0,
+		proto.MessageFromServer,
+		&countingOutboundEncoder{count: &encodes},
+		0,
+	)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if sent != 2 {
+		t.Fatalf("sent = %d, want 2", sent)
+	}
+	if encodes != 1 {
+		t.Fatalf("encoded %d times, want 1", encodes)
 	}
 }
 

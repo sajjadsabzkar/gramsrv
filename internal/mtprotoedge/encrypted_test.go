@@ -301,6 +301,32 @@ func TestPingDelayDisconnectEvenSeqAccepted(t *testing.T) {
 	}
 }
 
+func TestPingDelayDisconnectOddSeqAccepted(t *testing.T) {
+	const dc = 2
+	addr, pub, _ := startTestServer(t, Options{DC: dc})
+	conn, auth, cipher := dialHandshake(t, addr, dc, pub)
+
+	clientMsgID := proto.NewMessageIDGen(time.Now)
+	reqMsgID := clientMsgID.New(proto.MessageFromClient)
+	sendEncryptedWithSeq(t, conn, cipher, auth, reqMsgID, 1, &mt.PingDelayDisconnectRequest{
+		PingID:          10,
+		DisconnectDelay: 60,
+	})
+
+	replies := collectReplies(t, conn, cipher, auth.AuthKey, mt.PongTypeID)
+	if _, ok := replies[mt.BadMsgNotificationTypeID]; ok {
+		t.Fatalf("odd ping_delay_disconnect seq_no produced bad_msg_notification")
+	}
+	buf := mustHave(t, replies, mt.PongTypeID, "pong")
+	var pong mt.Pong
+	if err := pong.Decode(buf); err != nil {
+		t.Fatalf("decode pong: %v", err)
+	}
+	if pong.MsgID != reqMsgID || pong.PingID != 10 {
+		t.Fatalf("pong = %+v, want msg_id=%d ping_id=10", pong, reqMsgID)
+	}
+}
+
 // TestDestroyAuthKey 验证 MTProto service message destroy_auth_key 由连接层直接响应，
 // 避免 TDesktop 清理旧 key 时落到业务 RPC fallback。
 func TestDestroyAuthKey(t *testing.T) {

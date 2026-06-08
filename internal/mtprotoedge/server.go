@@ -221,7 +221,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	if s.obfuscated {
 		transportListener = transport.ObfuscatedListener(ln)
 	}
-	l := transport.ListenCodec(s.codec, transportListener)
+	l := newCompatTransportListener(s.codec, transportListener)
 	s.log.Info("Serving", zap.String("addr", ln.Addr().String()), zap.Int("dc", s.dc), zap.Bool("obfuscated_tcp", s.obfuscated))
 	defer s.log.Info("Stopped")
 

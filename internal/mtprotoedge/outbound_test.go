@@ -1,16 +1,57 @@
 package mtprotoedge
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/tg"
 )
+
+func TestEncryptOutboundFrameDecryptsWithGotdCipher(t *testing.T) {
+	var key crypto.Key
+	if _, err := rand.Read(key[:]); err != nil {
+		t.Fatalf("rand key: %v", err)
+	}
+	authKey := key.WithID()
+	body := mustEncodeTL(t, &mt.NewSessionCreated{
+		FirstMsgID: 111,
+		UniqueID:   222,
+		ServerSalt: 333,
+	})
+	c := &Conn{
+		cipher:    crypto.NewServerCipher(rand.Reader),
+		key:       authKey,
+		salt:      12345,
+		sessionID: 67890,
+	}
+	out, err := c.encryptOutboundFrame(&outboundFrame{
+		msgID:  7649066000000000001,
+		seqNo:  1,
+		typeID: mt.NewSessionCreatedTypeID,
+		body:   body,
+	})
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	data, err := crypto.NewClientCipher(rand.Reader).DecryptFromBuffer(authKey, &bin.Buffer{Buf: append([]byte(nil), out.Raw()...)})
+	if err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	if data.Salt != c.salt || data.SessionID != c.sessionID {
+		t.Fatalf("salt/session = %d/%d, want %d/%d", data.Salt, data.SessionID, c.salt, c.sessionID)
+	}
+	if got := data.Data(); !bytes.Equal(got, body) {
+		t.Fatalf("body = %x, want %x", got, body)
+	}
+}
 
 func TestOutboundActorSerializesConcurrentSends(t *testing.T) {
 	const dc = 2

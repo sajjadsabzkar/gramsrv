@@ -2,9 +2,13 @@ package mtprotoedge
 
 import (
 	"context"
+	"crypto/aes"
 	"errors"
 	"fmt"
+	"io"
 	"time"
+
+	"github.com/gotd/ige"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
@@ -45,10 +49,17 @@ type outboundOp struct {
 	ctx        context.Context
 	msgType    proto.MessageType
 	msg        bin.Encoder
+	encoded    *encodedOutboundMessage
 	ids        []int64
 	reqMsgID   int64
 	enqueuedAt time.Time
 	done       chan outboundResult
+}
+
+type encodedOutboundMessage struct {
+	body     []byte
+	typeID   uint32
+	reqMsgID int64
 }
 
 type outboundResult struct {
@@ -119,6 +130,14 @@ func (c *Conn) SendPriority(ctx context.Context, t proto.MessageType, msg bin.En
 // SendBestEffort 只等待消息进入普通 outbound 队列，不等待网络写完成。
 // 用于 updates fanout：队列拥塞时返回 ErrOutboundQueueFull，durable outbox/getDifference 负责兜底。
 func (c *Conn) SendBestEffort(ctx context.Context, t proto.MessageType, msg bin.Encoder, timeout time.Duration) error {
+	return c.sendBestEffort(ctx, t, msg, nil, timeout)
+}
+
+func (c *Conn) SendBestEffortEncoded(ctx context.Context, t proto.MessageType, encoded *encodedOutboundMessage, timeout time.Duration) error {
+	return c.sendBestEffort(ctx, t, nil, encoded, timeout)
+}
+
+func (c *Conn) sendBestEffort(ctx context.Context, t proto.MessageType, msg bin.Encoder, encoded *encodedOutboundMessage, timeout time.Duration) error {
 	if c.outbound == nil || c.outboundControl == nil {
 		return ErrConnClosed
 	}
@@ -131,6 +150,7 @@ func (c *Conn) SendBestEffort(ctx context.Context, t proto.MessageType, msg bin.
 		ctx:        writeCtx,
 		msgType:    t,
 		msg:        msg,
+		encoded:    encoded,
 		enqueuedAt: time.Now(),
 	}
 	if timeout == 0 {
@@ -164,6 +184,14 @@ func (c *Conn) SendBestEffort(ctx context.Context, t proto.MessageType, msg bin.
 }
 
 func (c *Conn) send(ctx context.Context, t proto.MessageType, msg bin.Encoder, control bool) error {
+	return c.sendOutbound(ctx, t, msg, nil, control)
+}
+
+func (c *Conn) SendEncoded(ctx context.Context, t proto.MessageType, encoded *encodedOutboundMessage) error {
+	return c.sendOutbound(ctx, t, nil, encoded, false)
+}
+
+func (c *Conn) sendOutbound(ctx context.Context, t proto.MessageType, msg bin.Encoder, encoded *encodedOutboundMessage, control bool) error {
 	if c.outbound == nil || c.outboundControl == nil {
 		return ErrConnClosed
 	}
@@ -173,6 +201,7 @@ func (c *Conn) send(ctx context.Context, t proto.MessageType, msg bin.Encoder, c
 		ctx:        ctx,
 		msgType:    t,
 		msg:        msg,
+		encoded:    encoded,
 		enqueuedAt: time.Now(),
 		done:       make(chan outboundResult, 1),
 	}
@@ -391,7 +420,7 @@ func (c *Conn) handleOutboundOp(state *outboundState, op outboundOp) {
 }
 
 func (c *Conn) handleOutboundSend(state *outboundState, op outboundOp) {
-	frame, err := c.buildFrame(op.msgType, op.msg)
+	frame, err := c.buildFrame(op.msgType, op.msg, op.encoded)
 	if err == nil {
 		err = c.writeFrame(op.ctx, frame)
 	}
@@ -465,7 +494,26 @@ func (op outboundOp) finish(res outboundResult) {
 	}
 }
 
-func (c *Conn) buildFrame(t proto.MessageType, msg bin.Encoder) (*outboundFrame, error) {
+func (c *Conn) buildFrame(t proto.MessageType, msg bin.Encoder, encoded *encodedOutboundMessage) (*outboundFrame, error) {
+	if encoded == nil {
+		var err error
+		encoded, err = encodeOutboundMessage(msg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	content := frameNeedsAck(encoded.typeID)
+	msgID := c.msgID.New(t)
+	return &outboundFrame{
+		msgID:    msgID,
+		seqNo:    c.nextSeqNo(content),
+		typeID:   encoded.typeID,
+		body:     encoded.body,
+		reqMsgID: encoded.reqMsgID,
+	}, nil
+}
+
+func encodeOutboundMessage(msg bin.Encoder) (*encodedOutboundMessage, error) {
 	if msg == nil {
 		return nil, errors.New("nil outbound message")
 	}
@@ -477,13 +525,9 @@ func (c *Conn) buildFrame(t proto.MessageType, msg bin.Encoder) (*outboundFrame,
 	if err != nil {
 		return nil, fmt.Errorf("peek outbound type id: %w", err)
 	}
-	content := frameNeedsAck(typeID)
-	msgID := c.msgID.New(t)
-	return &outboundFrame{
-		msgID:    msgID,
-		seqNo:    c.nextSeqNo(content),
+	return &encodedOutboundMessage{
 		typeID:   typeID,
-		body:     body.Copy(),
+		body:     body.Raw(),
 		reqMsgID: outboundRequestMsgID(msg),
 	}, nil
 }
@@ -501,15 +545,8 @@ func (c *Conn) writeFrame(ctx context.Context, frame *outboundFrame) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var out bin.Buffer
-	if err := c.cipher.Encrypt(c.key, crypto.EncryptedMessageData{
-		Salt:                   c.salt,
-		SessionID:              c.sessionID,
-		MessageID:              frame.msgID,
-		SeqNo:                  frame.seqNo,
-		MessageDataLen:         int32(len(frame.body)),
-		MessageDataWithPadding: frame.body,
-	}, &out); err != nil {
+	out, err := c.encryptOutboundFrame(frame)
+	if err != nil {
 		return fmt.Errorf("encrypt: %w", err)
 	}
 
@@ -523,7 +560,7 @@ func (c *Conn) writeFrame(ctx context.Context, frame *outboundFrame) error {
 	if writer == nil {
 		writer = c.transport
 	}
-	if err := writer.Send(sendCtx, &out); err != nil {
+	if err := writer.Send(sendCtx, out); err != nil {
 		return fmt.Errorf("send: %w", err)
 	}
 	if frame.sentAt.IsZero() {
@@ -531,6 +568,61 @@ func (c *Conn) writeFrame(ctx context.Context, frame *outboundFrame) error {
 		frame.sends = 1
 	}
 	return nil
+}
+
+func (c *Conn) encryptOutboundFrame(frame *outboundFrame) (*bin.Buffer, error) {
+	plain := &c.outboundPlain
+	plain.Reset()
+	plain.PutLong(c.salt)
+	plain.PutLong(c.sessionID)
+	plain.PutLong(frame.msgID)
+	plain.PutInt32(frame.seqNo)
+	plain.PutInt32(int32(len(frame.body)))
+	plain.Put(frame.body)
+
+	paddingOffset := plain.Len()
+	paddingLen := encryptedPaddingLen(paddingOffset)
+	growBinBufferLen(plain, paddingOffset+paddingLen)
+	if _, err := io.ReadFull(c.cipher.Rand(), plain.Buf[paddingOffset:]); err != nil {
+		return nil, err
+	}
+
+	msgKey := crypto.MessageKey(c.key.Value, plain.Raw(), crypto.Server)
+	key, iv := crypto.Keys(c.key.Value, msgKey, crypto.Server)
+	aesBlock, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+
+	wireLen := len(c.key.ID) + len(msgKey) + plain.Len()
+	wire := &c.outboundWire
+	ensureBinBufferLen(wire, wireLen)
+	copy(wire.Buf[:len(c.key.ID)], c.key.ID[:])
+	copy(wire.Buf[len(c.key.ID):len(c.key.ID)+len(msgKey)], msgKey[:])
+	ige.EncryptBlocks(aesBlock, iv[:], wire.Buf[len(c.key.ID)+len(msgKey):], plain.Raw())
+	return wire, nil
+}
+
+func encryptedPaddingLen(l int) int {
+	return 16 + (16 - (l % 16))
+}
+
+func ensureBinBufferLen(b *bin.Buffer, n int) {
+	if cap(b.Buf) < n {
+		b.Buf = make([]byte, n)
+		return
+	}
+	b.Buf = b.Buf[:n]
+}
+
+func growBinBufferLen(b *bin.Buffer, n int) {
+	if cap(b.Buf) < n {
+		next := make([]byte, n)
+		copy(next, b.Buf)
+		b.Buf = next
+		return
+	}
+	b.Buf = b.Buf[:n]
 }
 
 func frameNeedsAck(typeID uint32) bool {
