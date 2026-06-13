@@ -6,9 +6,9 @@ confirmed source checkpoint.
 
 ## Current Checkpoint
 
-- Last synced source commit: `c0a0e5b52240ed415d3b43ba77659821887bf50b`
-- Last synced target commit: `860e581`
-- Sync date: 2026-06-10
+- Last synced source commit: `77b033c8bf8c0a76ff0d7065e2192cbe55d3a3b6`
+- Last synced target commit: `75a8861`
+- Sync date: 2026-06-14
 - Source path used locally: `D:\work\waikuai\telegram\telesrv`
 - Target path used locally: `D:\work\waikuai\telegram\gramsrv-public`
 
@@ -20,10 +20,12 @@ confirmed source checkpoint.
 | 2026-06-09 | `07b2497664bd108dec84f6cfe43715540faf2688` | `6fd690a` | synced | Kept admin/ban participant changes as transient `updateChannelParticipant` pushes instead of durable channel pts events; added memory/Postgres regression coverage. |
 | 2026-06-10 | `c65f76f56278f74082c4fa792ed49104d5d33c38` | `d84fa6e` | synced | Aligned private and channel read/update semantics, including content unread state, block-aware private sends/forwards, channel difference nudges, and durable read-content events. |
 | 2026-06-10 | `c0a0e5b52240ed415d3b43ba77659821887bf50b` | `860e581` | synced | Added viewer-specific user projection, contact accept/phone sharing behavior, and regression coverage for contact/user/message projections. |
+| 2026-06-14 | `a636192ef22ee69d792b0ca7db1c6be963be9cb2` | `8ff3343` | synced | Added privacy-aware user projection, account privacy persistence/service, profile/fallback photo kinds, and viewer-specific dialog/message/user projections. |
+| 2026-06-14 | `77b033c8bf8c0a76ff0d7065e2192cbe55d3a3b6` | `75a8861` | synced | Exposed account privacy RPCs and profile/contact photo RPCs, plus `users.getFullUser` privacy and photo projection updates. |
 
 ## Next Sync
 
-Start the next batch from source commits after `c0a0e5b52240ed415d3b43ba77659821887bf50b`.
+Start the next batch from source commits after `77b033c8bf8c0a76ff0d7065e2192cbe55d3a3b6`.
 At the time this log was created, newer `telesrv` commits existed after that point and were
 intentionally left out because the latest batch was scoped to the next two commits after
-`07b2497664bd108dec84f6cfe43715540faf2688`.
+`c0a0e5b52240ed415d3b43ba77659821887bf50b`.
