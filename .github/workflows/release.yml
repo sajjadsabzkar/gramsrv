@@ -76,23 +76,18 @@ jobs:
         echo "Building ${{ matrix.binary_name }} from ./cmd/telesrv for ${{ matrix.goos }}/${{ matrix.goarch }}..."
         go build -ldflags "-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}" \
           -o build/${{ matrix.goos }}_${{ matrix.goarch }}/${{ matrix.binary_name }} ./cmd/telesrv
-    - name: Package Artifacts (Tar/Zip)
+   
+    - name: Package Artifacts (Tar)
       shell: bash
       run: |
         cd build/${{ matrix.goos }}_${{ matrix.goarch }}
-        if [ "${{ matrix.goos }}" = "windows" ]; then
-          zip ../../gramsrv-${{ matrix.goos }}-${{ matrix.goarch }}.zip ${{ matrix.binary_name }}
-        else
-          tar -czvf ../../gramsrv-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz ${{ matrix.binary_name }}
-        fi
+        tar -czvf ../../gramsrv-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz ${{ matrix.binary_name }}
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
         name: gramsrv-${{ matrix.goos }}-${{ matrix.goarch }}
-        path: |
-          *.tar.gz
-          *.zip
+        path: "*.tar.gz"
         retention-days: 7
 
   release:
