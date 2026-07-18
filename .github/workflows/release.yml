@@ -73,12 +73,9 @@ jobs:
       run: |
         BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
         VERSION=${GITHUB_REF_NAME}
-        
-        echo "Building ${{ matrix.binary_name }} for ${{ matrix.goos }}/${{ matrix.goarch }}..."
-        
+        echo "Building ${{ matrix.binary_name }} from ./cmd/telesrv for ${{ matrix.goos }}/${{ matrix.goarch }}..."
         go build -ldflags "-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}" \
-          -o build/${{ matrix.goos }}_${{ matrix.goarch }}/${{ matrix.binary_name }} .
-
+          -o build/${{ matrix.goos }}_${{ matrix.goarch }}/${{ matrix.binary_name }} ./cmd/telesrv
     - name: Package Artifacts (Tar/Zip)
       shell: bash
       run: |
